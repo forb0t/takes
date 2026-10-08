@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["crates/takes-core", "crates/takes-cli", "apps/desktop/src-tauri"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+# let-chains and slice::as_chunks
+rust-version = "1.88"
