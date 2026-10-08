@@ -48,11 +48,37 @@ export function splitPath(path: string): { dir: string; name: string } {
 
 const AUDIO = new Set(["wav", "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "aif", "aiff", "webm"]);
 
-export function isAudio(path: string): boolean {
+const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"]);
+
+function extension(path: string): string {
   const name = splitPath(path).name;
   const dot = name.lastIndexOf(".");
-  return dot > 0 && AUDIO.has(name.slice(dot + 1).toLowerCase());
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
+
+const TEXT = new Set([
+  "txt", "md", "markdown", "lrc", "srt", "vtt", "csv", "tsv", "json", "xml", "yaml", "yml", "toml",
+  "ini", "cfg", "conf", "log", "html", "htm", "tex", "chordpro", "cho", "abc",
+]);
+
+export const isAudio = (path: string) => AUDIO.has(extension(path));
+export const isImage = (path: string) => IMAGE.has(extension(path));
+export const isText = (path: string) => TEXT.has(extension(path));
+export const isPdf = (path: string) => extension(path) === "pdf";
+
+/** How the app shows a file: played, viewed, read, or not at all. */
+export type PreviewKind = "audio" | "image" | "text" | "pdf";
+
+export function previewKind(path: string): PreviewKind | null {
+  if (isAudio(path)) return "audio";
+  if (isImage(path)) return "image";
+  if (isText(path)) return "text";
+  if (isPdf(path)) return "pdf";
+  return null;
+}
+
+/** Labels offered first, in a musician's order of work. */
+export const LABEL_PRESETS = ["демо", "сведение", "мастер", "финал"];
 
 /** `dir/song.wav` → `dir/song (label).wav`. */
 export function copyName(path: string, label: string): string {
@@ -80,7 +106,11 @@ export interface Label {
 /** Branch and tag names attached to each version id. */
 export function labelsById(overview: Overview): Map<string, Label[]> {
   const labels = new Map<string, Label[]>();
-  const add = (id: string, label: Label) => labels.set(id, [...(labels.get(id) ?? []), label]);
+  const add = (id: string, label: Label) => {
+    const list = labels.get(id);
+    if (list) list.push(label);
+    else labels.set(id, [label]);
+  };
   for (const b of overview.branches) {
     if (b.head) add(b.head, { text: b.name, kind: b.current ? "current" : "branch" });
   }

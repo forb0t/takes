@@ -18,6 +18,8 @@ pub enum Error {
     InvalidName(String),
     #[error("invalid path '{0}'")]
     InvalidPath(String),
+    #[error("invalid {0}: labels take up to 40 characters, keys up to 12, tempo 20–400 BPM")]
+    InvalidMeta(String),
     #[error("branch '{0}' already exists")]
     BranchExists(String),
     #[error("tag '{0}' already exists")]
@@ -38,6 +40,12 @@ pub enum Error {
     WouldOverwrite(Vec<String>),
     #[error("files are open in another program or read-only")]
     FileBusy(Vec<String>),
+    #[error("files changed while being saved; another program is still writing them")]
+    FileChanging(Vec<String>),
+    #[error("the content of '{0}' in this version was removed to free space")]
+    ContentPruned(String),
+    #[error("another operation on this project is running; try again when it ends")]
+    Busy,
     #[error("'{path}' does not exist in version {rev}")]
     PathNotFound { path: String, rev: String },
     #[error("no comment with id {0}")]
@@ -56,6 +64,8 @@ pub enum Error {
     RemoteNotEmpty,
     #[error("no takes project found at the remote")]
     NotARemote,
+    #[error("{0} was made by a newer version of takes; update takes to open it")]
+    TooNew(&'static str),
     #[error("project data is damaged: {0}")]
     Corrupt(String),
     #[error(transparent)]

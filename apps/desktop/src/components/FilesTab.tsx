@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText, type FileInfo, type FileVersion, type Overview } from "../api";
 import { CompareButton, PlayButton } from "../player";
-import { Empty, Icon, KindBadge } from "../ui";
+import { Empty, FileLabels, Icon, KindBadge } from "../ui";
 import { formatDate, formatSize, short, splitPath } from "../util";
+import { FileMetaDialog } from "./FileMetaDialog";
 import { useFileActions } from "./useFileActions";
 
 export function FilesTab({ overview, onChanged }: { overview: Overview; onChanged: () => void }) {
   const root = overview.root;
   const head = overview.head;
   const [files, setFiles] = useState<FileInfo[] | null>(null);
+  /** Bumped when labels change, to reload the lists. */
+  const [labelsVersion, setLabelsVersion] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +30,7 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
     return () => {
       alive = false;
     };
-  }, [root, head]);
+  }, [root, head, labelsVersion]);
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -35,7 +38,9 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
     for (const f of files ?? []) {
       if (q && !f.path.toLowerCase().includes(q)) continue;
       const { dir } = splitPath(f.path);
-      byDir.set(dir, [...(byDir.get(dir) ?? []), f]);
+      const list = byDir.get(dir);
+      if (list) list.push(f);
+      else byDir.set(dir, [f]);
     }
     return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [files, query]);
@@ -83,6 +88,7 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
                   onClick={() => setSelected(f.path)}
                 >
                   <span className="file-name">{splitPath(f.path).name}</span>
+                  <FileLabels labels={f.labels} />
                   <span className="size">{formatSize(f.size)}</span>
                 </button>
               ))}
@@ -92,7 +98,14 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
       </div>
       <div className="split-right scroll">
         {selected ? (
-          <FileHistory key={selected} root={root} path={selected} onChanged={onChanged} />
+          <FileHistory
+            key={selected}
+            root={root}
+            path={selected}
+            labelsVersion={labelsVersion}
+            onChanged={onChanged}
+            onLabels={() => setLabelsVersion((v) => v + 1)}
+          />
         ) : (
           <div className="center muted">Выберите файл</div>
         )}
@@ -101,10 +114,23 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
   );
 }
 
-function FileHistory({ root, path, onChanged }: { root: string; path: string; onChanged: () => void }) {
+function FileHistory({
+  root,
+  path,
+  labelsVersion,
+  onChanged,
+  onLabels,
+}: {
+  root: string;
+  path: string;
+  labelsVersion: number;
+  onChanged: () => void;
+  onLabels: () => void;
+}) {
   const actions = useFileActions(root, onChanged);
   const [versions, setVersions] = useState<FileVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<FileVersion | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -115,7 +141,7 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
     return () => {
       alive = false;
     };
-  }, [root, path]);
+  }, [root, path, labelsVersion]);
 
   const { dir, name } = splitPath(path);
   return (
@@ -131,7 +157,7 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
       <div className="versions">
         {versions?.map((v, i) => {
           const id = v.snapshot.id;
-          const exists = v.kind !== "deleted";
+          const exists = v.kind !== "deleted" && !v.pruned;
           return (
             <div key={id} className="version">
               <div className="version-main">
@@ -139,6 +165,12 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
                   <KindBadge kind={v.kind} />
                   <span className="version-message">{v.snapshot.message || "Без описания"}</span>
                   {i === 0 && exists && <span className="label label-current">последняя</span>}
+                  {v.pruned && (
+                    <span className="muted" title="Содержимое удалено при очистке места">
+                      удалён при очистке
+                    </span>
+                  )}
+                  <FileLabels labels={v.labels} />
                 </div>
                 <div className="commit-meta">
                   <span>{formatDate(v.snapshot.createdAt)}</span>
@@ -149,7 +181,7 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
               </div>
               {exists && (
                 <div className="row-actions">
-                  {versions[i + 1] && versions[i + 1].kind !== "deleted" && (
+                  {versions[i + 1] && versions[i + 1].kind !== "deleted" && !versions[i + 1].pruned && (
                     <CompareButton
                       a={{
                         root,
@@ -161,6 +193,13 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
                     />
                   )}
                   <PlayButton track={{ root, rev: id, path, label: `Версия ${short(id)} · ${v.snapshot.message}` }} />
+                  <button
+                    className="btn btn-small btn-ghost"
+                    title="Метки («демо», «мастер»…), темп и тональность"
+                    onClick={() => setEditing(v)}
+                  >
+                    <Icon name="label" size={14} /> Метки
+                  </button>
                   <button className="btn btn-small btn-ghost" onClick={() => actions.restore(path, id)}>
                     <Icon name="restore" size={14} /> Вернуть
                   </button>
@@ -173,6 +212,16 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
           );
         })}
       </div>
+      {editing && (
+        <FileMetaDialog
+          root={root}
+          rev={editing.snapshot.id}
+          path={path}
+          versionLabel={`Версия ${short(editing.snapshot.id)} · ${editing.snapshot.message || "без описания"}`}
+          onClose={() => setEditing(null)}
+          onSaved={onLabels}
+        />
+      )}
     </div>
   );
 }

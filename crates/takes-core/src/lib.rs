@@ -20,6 +20,7 @@ mod model;
 mod remote;
 mod repo;
 mod store;
+mod text;
 mod worktree;
 
 pub use error::{Error, Result};
@@ -30,8 +31,9 @@ pub use model::{
 };
 pub use remote::{FolderStorage, RemoteConfig, Storage, WebDavStorage};
 pub use repo::{
-    Blocked, DEFAULT_BRANCH, Diverged, Repo, SyncPhase, SyncProgress, SyncReport, SyncState,
-    find_remote_projects, is_remote_project, validate_name,
+    Blocked, Cleanup, DEFAULT_BRANCH, Diverged, FileMeta, Repo, SyncPhase, SyncProgress,
+    SyncReport, SyncState, find_remote_projects, is_remote_project, validate_name,
 };
 pub use store::hash_file;
+pub use text::decode_text;
 pub use worktree::{IGNORE_FILE, META_DIR};

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{Error, Result};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE config (
@@ -109,6 +109,46 @@ CREATE TABLE remote_refs (
 CREATE TABLE remote_seen (path TEXT PRIMARY KEY);
 ";
 
+/// Version 3: deleted branches stay deleted on other devices; old contents
+/// can be removed to free space.
+const MIGRATION_3: &str = "
+-- Branches deleted here, with their last version, so that sync neither
+-- brings them back nor keeps them on devices that have nothing newer.
+CREATE TABLE deleted_branches (
+    name        TEXT PRIMARY KEY,
+    snapshot_id BLOB NOT NULL,
+    deleted_at  INTEGER NOT NULL
+);
+CREATE TABLE remote_deleted (
+    device      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    snapshot_id BLOB NOT NULL,
+    PRIMARY KEY (device, name)
+);
+
+-- Contents whose chunks were removed by cleanup (their versions remain in
+-- the history, the file data does not).
+CREATE TABLE pruned_blobs (hash BLOB PRIMARY KEY);
+";
+
+/// Version 4: labels, tempo and key that musicians set on file contents.
+const MIGRATION_4: &str = "
+-- Every change is kept (and synced as is); for each content and field the
+-- latest change wins, so devices agree without coordination.
+CREATE TABLE meta_events (
+    uid    TEXT PRIMARY KEY,
+    blob   BLOB NOT NULL,
+    -- 'label:<name>' (value '1' = set, '' = removed), 'bpm' or 'key'
+    field  TEXT NOT NULL,
+    value  TEXT NOT NULL,
+    -- unix milliseconds
+    at     INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    pushed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX meta_events_blob ON meta_events (blob, field);
+";
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -122,15 +162,19 @@ pub fn open(path: &Path) -> Result<Connection> {
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > SCHEMA_VERSION {
-        return Err(Error::Corrupt(format!(
-            "project was created by a newer version of takes (schema {version})"
-        )));
+        return Err(Error::TooNew("this project"));
     }
     if version < 1 {
         conn.execute_batch(SCHEMA)?;
     }
     if version < 2 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_2} COMMIT;"))?;
+    }
+    if version < 3 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_3} COMMIT;"))?;
+    }
+    if version < 4 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_4} COMMIT;"))?;
     }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())

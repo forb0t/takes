@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -148,6 +149,37 @@ impl ObjectStore {
             )));
         }
         Ok(())
+    }
+
+    /// Files in the store that are not chunks in `needed`, with their sizes:
+    /// unused chunks and leftovers of interrupted writes. Only meaningful
+    /// while nothing else writes to the store.
+    pub fn unreferenced(&self, needed: &HashSet<Hash>) -> Result<Vec<(PathBuf, u64)>> {
+        let mut garbage = Vec::new();
+        let buckets = match fs::read_dir(&self.dir) {
+            Ok(buckets) => buckets,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(garbage),
+            Err(e) => return Err(e.into()),
+        };
+        for bucket in buckets {
+            let bucket = bucket?;
+            if !bucket.file_type()?.is_dir() {
+                continue;
+            }
+            let prefix = bucket.file_name().to_string_lossy().into_owned();
+            for file in fs::read_dir(bucket.path())? {
+                let file = file?;
+                let name = format!("{prefix}{}", file.file_name().to_string_lossy());
+                if Hash::from_hex(&name).is_some_and(|h| needed.contains(&h)) {
+                    continue;
+                }
+                let meta = file.metadata()?;
+                if meta.is_file() {
+                    garbage.push((file.path(), meta.len()));
+                }
+            }
+        }
+        Ok(garbage)
     }
 
     /// Number of stored chunks and the bytes they take on disk.

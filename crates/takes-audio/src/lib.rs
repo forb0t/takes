@@ -1,5 +1,8 @@
-//! Audio analysis for the player: a compact waveform overview and the
-//! integrated loudness (EBU R128) used to level-match A/B comparisons.
+//! Audio analysis for the player: a compact waveform overview, the
+//! integrated loudness (EBU R128) used to level-match A/B comparisons, and
+//! rough tempo and key estimates.
+
+mod music;
 
 use std::fs::File;
 use std::path::Path;
@@ -43,6 +46,10 @@ pub struct Analysis {
     pub rms: Vec<u8>,
     /// Integrated loudness in LUFS; `None` for silence.
     pub lufs: Option<f64>,
+    /// Estimated tempo; `None` without a clear pulse.
+    pub bpm: Option<f64>,
+    /// Estimated key, e.g. "Am" or "Eb"; `None` when unclear.
+    pub key: Option<String>,
 }
 
 /// Decodes the whole file and summarizes it.
@@ -108,6 +115,7 @@ struct Summary {
     rate: u32,
     channels: usize,
     meter: EbuR128,
+    features: music::Features,
     frames: u64,
     /// Per block: (peak, sum of squares of the mono mix, frames).
     blocks: Vec<(f32, f64, usize)>,
@@ -121,6 +129,7 @@ impl Summary {
             rate,
             channels,
             meter,
+            features: music::Features::new(rate),
             frames: 0,
             blocks: Vec::new(),
         })
@@ -137,6 +146,7 @@ impl Summary {
         for frame in interleaved.chunks_exact(self.channels) {
             let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
             let mono = frame.iter().sum::<f32>() / self.channels as f32;
+            self.features.push(mono);
             match self.blocks.last_mut() {
                 Some((p, sq, n)) if *n < BLOCK_FRAMES => {
                     *p = p.max(peak);
@@ -165,6 +175,7 @@ impl Summary {
             rms.push(to_byte((sum / n.max(1) as f64).sqrt()));
         }
         let lufs = self.meter.loudness_global().ok().filter(|l| l.is_finite());
+        let (bpm, key) = (self.features.tempo(), self.features.key());
         Ok(Analysis {
             duration_ms: self.frames * 1000 / u64::from(self.rate.max(1)),
             sample_rate: self.rate,
@@ -172,6 +183,8 @@ impl Summary {
             peaks,
             rms,
             lufs,
+            bpm,
+            key,
         })
     }
 }

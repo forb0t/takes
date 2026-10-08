@@ -7,7 +7,7 @@ use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use takes_core::{
     Blocked, Change, ChangeKind, Conflict, Entry, Error, MergeKind, MergeOutcome, RemoteConfig,
-    Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport,
+    Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport, decode_text,
 };
 
 #[derive(Parser)]
@@ -103,6 +103,35 @@ enum Command {
         path: PathBuf,
         dest: PathBuf,
     },
+    /// Pack all files of a version into a ZIP, e.g. a release for a label
+    Archive { rev: String, dest: PathBuf },
+    /// Show or change the labels, tempo and key of a file
+    /// (e.g. --add мастер --bpm 128 --key Am)
+    Label {
+        path: PathBuf,
+        /// The version whose file content gets the notes
+        #[arg(long, default_value = "HEAD")]
+        rev: String,
+        #[arg(long, value_name = "LABEL")]
+        add: Vec<String>,
+        #[arg(long, value_name = "LABEL")]
+        remove: Vec<String>,
+        /// Tempo set by hand; 0 removes it
+        #[arg(long)]
+        bpm: Option<f64>,
+        /// Key, e.g. Am; "-" removes it
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// What changed in a text file (lyrics, notes) between two versions
+    Diff {
+        path: PathBuf,
+        #[arg(long, default_value = "HEAD")]
+        from: String,
+        /// Default: the file as it is on disk now
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Comments on file versions
     Comment {
         #[command(subcommand)]
@@ -112,6 +141,18 @@ enum Command {
     Config { key: String, value: Option<String> },
     /// How much space the history takes
     Stats,
+    /// Free space: drop versions of deleted branches and, with
+    /// --older-than, the files of old intermediate versions
+    Cleanup {
+        /// Also remove the files of versions older than this many days,
+        /// except branch heads, tagged versions and versions with open
+        /// comments (they stay in the history, without their files)
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u32>,
+        /// Only show what would be freed
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show or set where the project syncs to
     Remote {
         #[command(subcommand)]
@@ -221,6 +262,12 @@ fn report(err: &anyhow::Error) {
             }
             eprintln!("move these files somewhere else first");
         }
+        Some(Error::FileChanging(paths)) => {
+            for path in paths {
+                eprintln!("  {path}");
+            }
+            eprintln!("wait until the other program finishes writing and save again");
+        }
         Some(Error::FileBusy(paths)) => {
             for path in paths {
                 eprintln!("  {path}");
@@ -315,8 +362,16 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::Ls { rev } => {
             let repo = open()?;
             let id = repo.resolve(rev.as_deref().unwrap_or("HEAD"))?;
+            let meta = repo.all_file_meta()?;
             for (path, entry) in repo.tree(id)? {
-                println!("{:>10}  {path}", human_size(entry.size));
+                match meta.get(&entry.blob).filter(|m| !m.labels.is_empty()) {
+                    Some(m) => println!(
+                        "{:>10}  {path}  [{}]",
+                        human_size(entry.size),
+                        m.labels.join(", ")
+                    ),
+                    None => println!("{:>10}  {path}", human_size(entry.size)),
+                }
             }
         }
 
@@ -456,6 +511,90 @@ fn run(command: Command) -> Result<ExitCode> {
             let repo = open()?;
             repo.export(&rev, &project_path(&repo, &path)?, &dest)?;
             println!("Wrote {}", dest.display());
+        }
+
+        Command::Archive { rev, dest } => {
+            let repo = open()?;
+            let files = repo.export_zip(&rev, &dest)?;
+            println!("Wrote {} file(s) to {}", files, dest.display());
+        }
+
+        Command::Label {
+            path,
+            rev,
+            add,
+            remove,
+            bpm,
+            key,
+        } => {
+            let repo = open()?;
+            let path = project_path(&repo, &path)?;
+            let blob = repo.file_at(&rev, &path)?.blob;
+            let mut meta = repo.file_meta(blob)?;
+            let change = !add.is_empty() || !remove.is_empty() || bpm.is_some() || key.is_some();
+            for label in add {
+                let label = label.trim().to_owned();
+                if !meta.labels.contains(&label) {
+                    meta.labels.push(label);
+                }
+            }
+            meta.labels.retain(|l| !remove.contains(l));
+            if let Some(bpm) = bpm {
+                meta.bpm = (bpm > 0.0).then_some(bpm);
+            }
+            if let Some(key) = key {
+                meta.key = (key != "-").then(|| key.trim().to_owned());
+            }
+            if change {
+                repo.set_file_meta(&rev, &path, &meta)?;
+                meta = repo.file_meta(blob)?;
+            }
+            let mut parts = Vec::new();
+            if !meta.labels.is_empty() {
+                parts.push(meta.labels.join(", "));
+            }
+            if let Some(bpm) = meta.bpm {
+                parts.push(format!("{bpm} BPM"));
+            }
+            if let Some(key) = &meta.key {
+                parts.push(key.clone());
+            }
+            if parts.is_empty() {
+                println!("{path}: no labels");
+            } else {
+                println!("{path}: {}", parts.join(" · "));
+            }
+        }
+
+        Command::Diff { path, from, to } => {
+            let repo = open()?;
+            let path = project_path(&repo, &path)?;
+            let read = |rev: &str| -> Result<Vec<u8>> {
+                let mut out = Vec::new();
+                repo.read_file(rev, &path, &mut out)?;
+                Ok(out)
+            };
+            let old = read(&from)?;
+            let new = match &to {
+                Some(rev) => read(rev)?,
+                None => std::fs::read(repo.abs(&path)?)
+                    .with_context(|| format!("cannot read {path}"))?,
+            };
+            let (Some(old), Some(new)) = (decode_text(&old), decode_text(&new)) else {
+                bail!("{path} is not a text file");
+            };
+            let diff = similar::TextDiff::from_lines(&old, &new);
+            if diff.ratio() == 1.0 {
+                println!("No changes.");
+            } else {
+                let to = to.as_deref().unwrap_or("on disk");
+                let text = diff
+                    .unified_diff()
+                    .context_radius(3)
+                    .header(&format!("{path} ({from})"), &format!("{path} ({to})"))
+                    .to_string();
+                print_diff(&text);
+            }
         }
 
         Command::Comment { command } => {
@@ -599,6 +738,23 @@ fn run(command: Command) -> Result<ExitCode> {
                 println!("Saved by dedup/compression: {saved}%");
             }
         }
+
+        Command::Cleanup {
+            older_than,
+            dry_run,
+        } => {
+            let mut repo = open()?;
+            let before = older_than
+                .map(|days| chrono::Utc::now().timestamp() - i64::from(days) * 24 * 60 * 60);
+            let c = repo.cleanup(before, dry_run)?;
+            let verb = if dry_run { "Would free" } else { "Freed" };
+            println!(
+                "{verb} {} ({} version(s) no branch leads to, {} old file version(s)).",
+                human_size(c.bytes),
+                c.versions,
+                c.contents
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -665,6 +821,9 @@ fn print_report(r: &SyncReport) {
     for b in &r.new_branches {
         println!("New branch {b}");
     }
+    for b in &r.deleted_branches {
+        println!("Branch {b} was deleted on another device");
+    }
     match &r.current_blocked {
         Some(Blocked::Unsaved) => {
             println!(
@@ -686,6 +845,25 @@ fn print_report(r: &SyncReport) {
             "Branch {} also changed on {}: merge with `takes merge \"{}\"`",
             d.branch, d.device, d.rev
         );
+    }
+}
+
+/// Prints a unified diff, in colour on a terminal.
+fn print_diff(text: &str) {
+    use std::io::IsTerminal;
+    let colour = std::io::stdout().is_terminal();
+    for line in text.lines() {
+        let code = match line.as_bytes().first() {
+            _ if !colour || line.starts_with("+++") || line.starts_with("---") => None,
+            Some(b'+') => Some("32"),
+            Some(b'-') => Some("31"),
+            Some(b'@') => Some("36"),
+            _ => None,
+        };
+        match code {
+            Some(code) => println!("\x1b[{code}m{line}\x1b[0m"),
+            None => println!("{line}"),
+        }
     }
 }
 

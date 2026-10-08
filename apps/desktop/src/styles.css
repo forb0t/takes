@@ -959,9 +959,16 @@ input[type="checkbox"] {
 }
 
 .file-name {
+  flex: 1;
   overflow: hidden;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file .file-labels {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .versions {
@@ -985,6 +992,7 @@ input[type="checkbox"] {
 }
 
 .version-main {
+  flex: 1;
   min-width: 0;
 }
 
@@ -994,7 +1002,14 @@ input[type="checkbox"] {
   gap: 8px;
 }
 
+.version-title .file-labels,
+.version-title .label {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+
 .version-message {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1111,6 +1126,10 @@ input[type="checkbox"] {
   color: var(--text);
   font-size: 13.5px;
   outline: none;
+}
+
+.stat-line {
+  font-size: 13px;
 }
 
 .hint {
@@ -1280,15 +1299,24 @@ input[type="checkbox"] {
 
 .waveform {
   --wave: #4c4955;
+  --wave-ghost: rgba(143, 199, 255, 0.55);
   position: relative;
   height: 56px;
   cursor: pointer;
 }
 
 .waveform canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.wave-played {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 .waveform.loading canvas {
@@ -1732,4 +1760,286 @@ input[type="checkbox"] {
 .empty-actions {
   display: flex;
   gap: 10px;
+}
+
+/* ---- image viewer ------------------------------------------------------------- */
+
+.image-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.image-view img,
+.image-compare img {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  border-radius: 6px;
+  object-fit: contain;
+  background: repeating-conic-gradient(#222 0 25%, #2a2a2a 0 50%) 0 0 / 16px 16px;
+}
+
+.image-view img {
+  margin: 0 auto;
+}
+
+/* Sized by the lower image, so both layers and the split line line up. */
+.image-compare {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+.image-compare .image-top {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+
+.image-split {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.image-compare-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.image-compare-labels b {
+  color: var(--accent);
+}
+
+.sync-warn {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--modified);
+}
+
+/* ---- file labels ---------------------------------------------------------------- */
+
+.file-labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-label {
+  padding: 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+
+.file-label-0 {
+  border-color: rgba(143, 168, 200, 0.45);
+  color: #a9bfdc;
+}
+
+.file-label-1 {
+  border-color: rgba(242, 195, 91, 0.45);
+  color: var(--modified);
+}
+
+.file-label-2 {
+  border-color: rgba(95, 209, 139, 0.45);
+  color: var(--added);
+}
+
+.file-label-3 {
+  border-color: rgba(255, 138, 76, 0.5);
+  color: var(--accent);
+}
+
+/* ---- documents: text, diff, PDF -------------------------------------------------- */
+
+.modal-doc {
+  width: min(1100px, 100%);
+  height: 100%;
+}
+
+.text-view {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.text-compare-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 12.5px;
+}
+
+.diff-add-mark {
+  color: var(--added);
+}
+
+.diff-del-mark {
+  color: var(--deleted);
+}
+
+.diff {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow: hidden;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 3.2em 3.2em 1.4em 1fr;
+}
+
+.diff-num {
+  padding-right: 8px;
+  color: var(--faint);
+  text-align: right;
+  user-select: none;
+}
+
+.diff-sign {
+  color: var(--faint);
+  user-select: none;
+}
+
+.diff-text {
+  padding-right: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-add {
+  background: rgba(95, 209, 139, 0.09);
+}
+
+.diff-add .diff-sign,
+.diff-add mark {
+  color: var(--added);
+}
+
+.diff-del {
+  background: rgba(240, 113, 120, 0.09);
+}
+
+.diff-del .diff-sign,
+.diff-del mark {
+  color: var(--deleted);
+}
+
+.diff mark {
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  font-weight: 600;
+}
+
+.diff-fold {
+  display: block;
+  width: 100%;
+  padding: 3px 0 3px 7.8em;
+  border: 0;
+  border-block: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.diff-fold:hover {
+  color: var(--text);
+}
+
+.pdf-columns {
+  display: grid;
+  gap: 12px;
+}
+
+.pdf-columns.two {
+  grid-template-columns: 1fr 1fr;
+}
+
+.pdf-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pdf-label {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pdf-pages canvas {
+  display: block;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.label-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.label-picker .file-label {
+  padding: 3px 11px;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.label-picker .file-label.on {
+  opacity: 1;
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.label-picker .file-label:hover {
+  opacity: 1;
 }

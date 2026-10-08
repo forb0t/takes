@@ -6,8 +6,8 @@ members = ["crates/takes-core", "crates/takes-cli", "apps/desktop/src-tauri", "c
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
-# let-chains and slice::as_chunks
-rust-version = "1.88"
+# let-chains, slice::as_chunks and File::lock
+rust-version = "1.89"
 
 # Decoding audio and hashing large files is very slow without optimizations,
 # so optimize dependencies and the audio crate even in dev builds.

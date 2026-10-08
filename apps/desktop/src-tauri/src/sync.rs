@@ -15,6 +15,7 @@ use crate::commands::{CmdResult, ProjectList, blocking, remember_project};
 use crate::dto::{CommandError, ProjectDto};
 
 const KEYCHAIN_SERVICE: &str = "app.takes.desktop";
+const AUTO_SYNC: &str = "sync.auto";
 pub const PROGRESS_EVENT: &str = "sync-progress";
 
 /// Projects being synced right now, to refuse a second concurrent sync.
@@ -88,6 +89,8 @@ pub struct SyncStateDto {
     diverged: Vec<DivergedDto>,
     waiting: Vec<String>,
     last_sync: Option<i64>,
+    /// Sync on its own: when the project opens, after saving, periodically.
+    auto: bool,
 }
 
 #[derive(Serialize)]
@@ -101,6 +104,7 @@ pub struct SyncReportDto {
     comments_received: u64,
     updated_branches: Vec<String>,
     new_branches: Vec<String>,
+    deleted_branches: Vec<String>,
     diverged: Vec<DivergedDto>,
     /// "unsaved" | "filesBusy" | "wouldOverwrite"
     current_blocked: Option<&'static str>,
@@ -124,6 +128,7 @@ impl From<&SyncReport> for SyncReportDto {
             comments_received: r.comments_received,
             updated_branches: r.updated_branches.clone(),
             new_branches: r.new_branches.clone(),
+            deleted_branches: r.deleted_branches.clone(),
             diverged: r.diverged.iter().map(Into::into).collect(),
             current_blocked,
             blocked_paths,
@@ -177,6 +182,7 @@ pub async fn sync_state(root: String) -> CmdResult<SyncStateDto> {
             diverged: state.diverged.iter().map(Into::into).collect(),
             waiting: state.waiting,
             last_sync: state.last_sync,
+            auto: repo.config(AUTO_SYNC)?.as_deref() != Some("0"),
         })
     })
     .await
@@ -214,11 +220,21 @@ pub async fn set_device_name(root: String, name: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
+pub async fn set_auto_sync(root: String, enabled: bool) -> CmdResult<()> {
+    blocking(move || Ok(Repo::open(&root)?.set_config(AUTO_SYNC, if enabled { "1" } else { "0" })?))
+        .await
+}
+
+/// Syncs with the project's remote. In the `background` (automatic) mode
+/// the working folder is never touched: a newer version of the current
+/// branch waits for `update_current`.
+#[tauri::command]
 pub async fn sync(
     app: AppHandle,
     syncing: State<'_, Syncing>,
     root: String,
     password: Option<String>,
+    background: bool,
 ) -> CmdResult<SyncReportDto> {
     if !syncing
         .0
@@ -240,7 +256,11 @@ pub async fn sync(
             .ok_or(takes_core::Error::RemoteNotConfigured)?;
         let storage = open_storage(&remote, password.clone())?;
         let mut progress = progress;
-        let report = repo.sync(storage.as_ref(), &mut progress)?;
+        let report = if background {
+            repo.sync_background(storage.as_ref(), &mut progress)?
+        } else {
+            repo.sync(storage.as_ref(), &mut progress)?
+        };
         // Remember a password that just worked.
         if let Some(password) = password.filter(|p| !p.is_empty()) {
             save_password(&remote, &password)?;
@@ -254,6 +274,13 @@ pub async fn sync(
         .unwrap_or_else(|e| e.into_inner())
         .remove(&key);
     result
+}
+
+/// Puts the newer version of the current branch that a background sync
+/// fetched into the working folder. Works offline.
+#[tauri::command]
+pub async fn update_current(root: String) -> CmdResult<SyncReportDto> {
+    blocking(move || Ok((&Repo::open(&root)?.update_current()?).into())).await
 }
 
 /// Projects in the folders right under `remote` (e.g. WebDAV "Takes").

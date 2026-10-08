@@ -1,9 +1,11 @@
 //! Shapes sent to the web UI. Hashes travel as hex strings, names in camelCase.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use takes_core::{
-    Branch, Change, ChangeKind, Comment, Conflict, Entry, Error, FileVersion, MergeKind,
-    MergeOutcome, MergePreview, Resolution, Snapshot, Stats, Tag,
+    Branch, Change, ChangeKind, Cleanup, Comment, Conflict, Entry, Error, FileMeta, FileVersion,
+    Hash, MergeKind, MergeOutcome, MergePreview, Resolution, Snapshot, Stats, Tag,
 };
 
 fn kind(kind: ChangeKind) -> &'static str {
@@ -21,6 +23,10 @@ pub struct ChangeDto {
     pub kind: &'static str,
     /// Size of the new content; absent for deletions and plain status.
     pub size: Option<u64>,
+    /// The content was removed by cleanup: it cannot be played or restored.
+    pub pruned: bool,
+    /// Labels on the new content ("мастер", …).
+    pub labels: Vec<String>,
 }
 
 impl From<&Change> for ChangeDto {
@@ -29,6 +35,8 @@ impl From<&Change> for ChangeDto {
             path: c.path.clone(),
             kind: kind(c.kind),
             size: None,
+            pruned: false,
+            labels: Vec::new(),
         }
     }
 }
@@ -106,6 +114,7 @@ pub struct OverviewDto {
 pub struct FileDto {
     pub path: String,
     pub size: u64,
+    pub labels: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -114,16 +123,64 @@ pub struct FileVersionDto {
     pub snapshot: SnapshotDto,
     pub kind: &'static str,
     pub size: Option<u64>,
+    pub pruned: bool,
+    pub labels: Vec<String>,
 }
 
-impl From<&FileVersion> for FileVersionDto {
-    fn from(v: &FileVersion) -> Self {
+impl FileVersionDto {
+    pub fn new(v: &FileVersion, pruned: &HashSet<Hash>, meta: &HashMap<Hash, FileMeta>) -> Self {
         Self {
             snapshot: (&v.snapshot).into(),
             kind: kind(v.kind),
             size: v.entry.map(|e| e.size),
+            pruned: v.entry.is_some_and(|e| pruned.contains(&e.blob)),
+            labels: labels(meta, v.entry.map(|e| e.blob)),
         }
     }
+}
+
+/// Labels of a content, if it has any.
+pub fn labels(meta: &HashMap<Hash, FileMeta>, blob: Option<Hash>) -> Vec<String> {
+    blob.and_then(|b| meta.get(&b))
+        .map(|m| m.labels.clone())
+        .unwrap_or_default()
+}
+
+/// Labels, tempo and key a musician set on a file content.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMetaDto {
+    pub labels: Vec<String>,
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+}
+
+impl From<FileMeta> for FileMetaDto {
+    fn from(m: FileMeta) -> Self {
+        Self {
+            labels: m.labels,
+            bpm: m.bpm,
+            key: m.key,
+        }
+    }
+}
+
+impl From<FileMetaDto> for FileMeta {
+    fn from(m: FileMetaDto) -> Self {
+        Self {
+            labels: m.labels,
+            bpm: m.bpm,
+            key: m.key,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDto {
+    pub text: String,
+    /// Only the beginning of a long file is included.
+    pub truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -242,11 +299,32 @@ impl From<Stats> for StatsDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CleanupDto {
+    pub versions: u64,
+    pub contents: u64,
+    pub bytes: u64,
+}
+
+impl From<Cleanup> for CleanupDto {
+    fn from(c: Cleanup) -> Self {
+        Self {
+            versions: c.versions,
+            contents: c.contents,
+            bytes: c.bytes,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalysisDto {
     /// Content hash, identifying the version for caching on the UI side.
     pub blob: String,
     #[serde(flatten)]
     pub analysis: takes_audio::Analysis,
+    /// Tempo and key set by hand, which win over the estimates.
+    pub manual_bpm: Option<f64>,
+    pub manual_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -318,6 +396,7 @@ impl From<Error> for CommandError {
             Error::AlreadyInitialized(_) => "alreadyInitialized",
             Error::InvalidName(_) => "invalidName",
             Error::InvalidPath(_) => "invalidPath",
+            Error::InvalidMeta(_) => "invalidMeta",
             Error::BranchExists(_) => "branchExists",
             Error::TagExists(_) => "tagExists",
             Error::UnbornBranch(_) => "unbornBranch",
@@ -325,6 +404,7 @@ impl From<Error> for CommandError {
             Error::CannotDeleteCurrentBranch(_) => "cannotDeleteCurrentBranch",
             Error::PathNotFound { .. } => "pathNotFound",
             Error::Corrupt(_) => "corrupt",
+            Error::TooNew(_) => "tooNew",
             Error::Remote(_) => "remote",
             Error::RemoteAuth => "remoteAuth",
             Error::RemoteMismatch => "remoteMismatch",
@@ -344,6 +424,15 @@ impl From<Error> for CommandError {
                 out.paths = paths.clone();
                 "fileBusy"
             }
+            Error::FileChanging(paths) => {
+                out.paths = paths.clone();
+                "fileChanging"
+            }
+            Error::ContentPruned(path) => {
+                out.paths = vec![path.clone()];
+                "contentPruned"
+            }
+            Error::Busy => "busy",
             _ => "other",
         };
         out

@@ -6,6 +6,10 @@ export interface Change {
   path: string;
   kind: ChangeKind;
   size: number | null;
+  /** Cleanup removed this content: it cannot be played or restored. */
+  pruned: boolean;
+  /** Labels on the content ("мастер", …); only in a version's changes. */
+  labels: string[];
 }
 
 export interface Snapshot {
@@ -40,12 +44,28 @@ export interface Overview {
 export interface FileInfo {
   path: string;
   size: number;
+  labels: string[];
 }
 
 export interface FileVersion {
   snapshot: Snapshot;
   kind: ChangeKind;
   size: number | null;
+  pruned: boolean;
+  labels: string[];
+}
+
+/** Labels, tempo and key a musician set on a file content. */
+export interface FileMeta {
+  labels: string[];
+  bpm: number | null;
+  key: string | null;
+}
+
+export interface TextFile {
+  text: string;
+  /** Only the beginning of a long file. */
+  truncated: boolean;
 }
 
 export interface Side {
@@ -85,6 +105,15 @@ export interface Stats {
   storedBytes: number;
 }
 
+/** What cleanup frees (or would free). */
+export interface Cleanup {
+  /** Versions nothing leads to any more, e.g. of deleted branches. */
+  versions: number;
+  /** Old file versions whose data goes; they stay in the history. */
+  contents: number;
+  bytes: number;
+}
+
 export interface Analysis {
   /** Content hash of the analyzed version. */
   blob: string;
@@ -96,6 +125,13 @@ export interface Analysis {
   rms: number[];
   /** Integrated loudness, LUFS; null for silence. */
   lufs: number | null;
+  /** Estimated tempo; null without a clear pulse. */
+  bpm: number | null;
+  /** Estimated key, e.g. "Am"; null when unclear. */
+  key: string | null;
+  /** Set by hand; wins over the estimates. */
+  manualBpm: number | null;
+  manualKey: string | null;
 }
 
 export interface Comment {
@@ -129,6 +165,8 @@ export interface SyncState {
   diverged: DivergedBranch[];
   waiting: string[];
   lastSync: number | null;
+  /** Sync on its own (on open, after saving, every few minutes). */
+  auto: boolean;
 }
 
 export interface SyncReport {
@@ -140,6 +178,7 @@ export interface SyncReport {
   commentsReceived: number;
   updatedBranches: string[];
   newBranches: string[];
+  deletedBranches: string[];
   diverged: DivergedBranch[];
   currentBlocked: "unsaved" | "filesBusy" | "wouldOverwrite" | null;
   blockedPaths: string[];
@@ -176,6 +215,9 @@ export const api = {
   files: (root: string, rev: string) => invoke<FileInfo[]>("files", { root, rev }),
   fileHistory: (root: string, path: string) => invoke<FileVersion[]>("file_history", { root, path }),
   stats: (root: string) => invoke<Stats>("stats", { root }),
+  cleanup: (root: string, olderThanDays: number | null, dryRun: boolean) =>
+    invoke<Cleanup>("cleanup", { root, olderThanDays, dryRun }),
+  exportZip: (root: string, rev: string, dest: string) => invoke<number>("export_zip", { root, rev, dest }),
   setAuthor: (root: string, name: string) => invoke<void>("set_author", { root, name }),
 
   switchBranch: (root: string, name: string) => invoke<void>("switch_branch", { root, name }),
@@ -201,13 +243,22 @@ export const api = {
   addComment: (root: string, rev: string | null, path: string, timecodeMs: number | null, text: string) =>
     invoke<number>("add_comment", { root, rev, path, timecodeMs, text }),
   resolveComment: (root: string, id: number) => invoke<void>("resolve_comment", { root, id }),
+  fileMeta: (root: string, rev: string | null, path: string) => invoke<FileMeta>("file_meta", { root, rev, path }),
+  setFileMeta: (root: string, rev: string, path: string, meta: FileMeta) =>
+    invoke<void>("set_file_meta", { root, rev, path, meta }),
+  textFile: (root: string, rev: string | null, path: string) => invoke<TextFile>("text_file", { root, rev, path }),
+  fileBytes: (root: string, rev: string | null, path: string) =>
+    invoke<ArrayBuffer>("file_bytes", { root, rev, path }),
 
   syncState: (root: string) => invoke<SyncState>("sync_state", { root }),
   setRemote: (root: string, remote: RemoteConfig, password: string | null) =>
     invoke<void>("set_remote", { root, remote, password }),
   removeRemote: (root: string) => invoke<void>("remove_remote", { root }),
   setDeviceName: (root: string, name: string) => invoke<void>("set_device_name", { root, name }),
-  sync: (root: string, password: string | null) => invoke<SyncReport>("sync", { root, password }),
+  sync: (root: string, password: string | null, background = false) =>
+    invoke<SyncReport>("sync", { root, password, background }),
+  updateCurrent: (root: string) => invoke<SyncReport>("update_current", { root }),
+  setAutoSync: (root: string, enabled: boolean) => invoke<void>("set_auto_sync", { root, enabled }),
   findRemoteProjects: (remote: RemoteConfig, password: string | null) =>
     invoke<string[]>("find_remote_projects", { remote, password }),
   isRemoteProject: (remote: RemoteConfig, password: string | null) =>
@@ -224,6 +275,9 @@ const MESSAGES: Record<string, string> = {
   notAProject: "В этой папке нет проекта.",
   invalidName: "Недопустимое имя: нельзя использовать ~ ^ : ? * [ \\ и «..».",
   invalidPath: "Недопустимый путь к файлу.",
+  invalidMeta: "Метка — до 40 символов, тональность — до 12, темп — от 20 до 400 BPM.",
+  notText: "Это не текстовый файл.",
+  tooLarge: "Файл слишком большой, чтобы показать его здесь.",
   branchExists: "Ветка с таким именем уже есть.",
   tagExists: "Метка с таким именем уже есть.",
   unbornBranch: "Сначала сохраните хотя бы одну версию.",
@@ -233,6 +287,7 @@ const MESSAGES: Record<string, string> = {
   wouldOverwrite: "Это перезапишет файлы, которых нет в сохранённой версии.",
   pathNotFound: "Файла нет в этой версии.",
   corrupt: "Данные проекта повреждены.",
+  tooNew: "Проект или хранилище созданы более новой версией Takes. Обновите приложение.",
   notAudio: "Не удалось прочитать звук: формат не поддерживается или файл повреждён.",
   remoteAuth: "Хранилище не приняло логин или пароль.",
   remoteMismatch: "В этом хранилище лежит другой проект. Выберите другую папку.",
@@ -244,12 +299,18 @@ const MESSAGES: Record<string, string> = {
   keychain: "Не удалось сохранить пароль в системной связке ключей.",
   alreadySyncing: "Синхронизация уже идёт.",
   unsavedFile: "Файл изменён и не сохранён. Сохраните версию, чтобы оставлять к нему комментарии.",
+  contentPruned: "Файл этой версии удалён при очистке места: его нельзя прослушать или вернуть.",
+  busy: "Сейчас с проектом идёт другая операция (например, синхронизация). Попробуйте, когда она закончится.",
 };
 
 export function errorText(e: unknown): string {
   if (isCommandError(e) && e.kind === "fileBusy") {
     const names = e.paths.map((p) => `«${p.split("/").pop()}»`).join(", ");
     return `Файлы открыты в другой программе (например, в DAW) или защищены от записи: ${names}. Закройте их и повторите. Ничего не изменено.`;
+  }
+  if (isCommandError(e) && e.kind === "fileChanging") {
+    const names = e.paths.map((p) => `«${p.split("/").pop()}»`).join(", ");
+    return `Файлы ещё записываются другой программой: ${names}. Дождитесь, пока она закончит, и сохраните снова.`;
   }
   if (isCommandError(e) && e.kind === "remote") return `Хранилище недоступно: ${e.message}`;
   if (isCommandError(e)) return MESSAGES[e.kind] ?? e.message;

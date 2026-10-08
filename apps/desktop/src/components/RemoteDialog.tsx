@@ -96,6 +96,7 @@ export function RemoteDialog({
   const [username, setUsername] = useState(current?.kind === "webDav" ? current.username : "");
   const [password, setPassword] = useState("");
   const [deviceName, setDeviceName] = useState(state.deviceName);
+  const [auto, setAuto] = useState(state.auto);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -122,6 +123,9 @@ export function RemoteDialog({
     try {
       if (deviceName.trim() && deviceName.trim() !== state.deviceName) {
         await api.setDeviceName(root, deviceName.trim());
+      }
+      if (auto !== state.auto) {
+        await api.setAutoSync(root, auto);
       }
       if (unchanged && !password) {
         onChanged();
@@ -220,6 +224,14 @@ export function RemoteDialog({
       <label className="field">
         <span>Имя этого компьютера (видно на других устройствах)</span>
         <input value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
+      </label>
+
+      <label className="check">
+        <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+        <span>
+          Синхронизировать автоматически
+          <span className="muted"> — при открытии, после сохранения и каждые 5 минут. Файлы в папке без спроса не меняются.</span>
+        </span>
       </label>
 
       {error && <div className="error-text">{error}</div>}

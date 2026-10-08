@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use takes_core::{
-    Blocked, Error, FolderStorage, MergeOutcome, RemoteConfig, Repo, Resolution, Storage,
+    Blocked, Error, FileMeta, FolderStorage, MergeOutcome, RemoteConfig, Repo, Resolution, Storage,
     SyncReport,
 };
 use tempfile::TempDir;
@@ -14,6 +14,7 @@ use tempfile::TempDir;
 struct Spy {
     inner: FolderStorage,
     writes: Mutex<Vec<String>>,
+    reads: Mutex<Vec<String>>,
     fail_prefix: Mutex<Option<String>>,
 }
 
@@ -22,6 +23,7 @@ impl Spy {
         Self {
             inner: FolderStorage::new(path),
             writes: Mutex::default(),
+            reads: Mutex::default(),
             fail_prefix: Mutex::default(),
         }
     }
@@ -46,6 +48,7 @@ impl Storage for Spy {
         self.inner.list(dir)
     }
     fn read(&self, path: &str) -> takes_core::Result<Option<Vec<u8>>> {
+        self.reads.lock().unwrap().push(path.to_owned());
         self.inner.read(path)
     }
     fn read_range(&self, path: &str, offset: u64, len: u64) -> takes_core::Result<Vec<u8>> {
@@ -429,6 +432,187 @@ fn deleted_branches_disappear_from_the_remote() {
         .map(|b| b.name)
         .collect();
     assert_eq!(names, ["main"]);
+}
+
+#[test]
+fn labels_travel_and_the_latest_change_wins() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "mix.wav", "mix");
+    laptop.commit("mix", &[]).unwrap();
+    let mastered = FileMeta {
+        labels: vec!["мастер".into()],
+        bpm: Some(92.0),
+        key: None,
+    };
+    laptop.set_file_meta("HEAD", "mix.wav", &mastered).unwrap();
+    assert_eq!(world.sync(&mut laptop).notes_sent, 2);
+
+    let mut studio = world.clone("studio");
+    let blob = studio.file_at("HEAD", "mix.wav").unwrap().blob;
+    assert_eq!(studio.file_meta(blob).unwrap(), mastered);
+
+    // The studio changes its mind later; both end up with that.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mixed = FileMeta {
+        labels: vec!["сведение".into()],
+        bpm: Some(92.0),
+        key: Some("Dm".into()),
+    };
+    studio.set_file_meta("HEAD", "mix.wav", &mixed).unwrap();
+    world.sync(&mut studio);
+    let report = world.sync(&mut laptop);
+    assert_eq!(report.notes_received, 3);
+    assert_eq!(laptop.file_meta(blob).unwrap(), mixed);
+    assert_eq!(world.sync(&mut laptop).notes_received, 0);
+}
+
+#[test]
+fn a_deleted_branch_goes_away_on_other_devices() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "a.wav", "a");
+    laptop.commit("a", &[]).unwrap();
+    laptop.create_branch("try", None).unwrap();
+    world.sync(&mut laptop);
+    let mut studio = world.clone("studio");
+    assert!(studio.branches().unwrap().iter().any(|b| b.name == "try"));
+
+    laptop.delete_branch("try").unwrap();
+    world.sync(&mut laptop);
+    let report = world.sync(&mut studio);
+    assert_eq!(report.deleted_branches, ["try"]);
+    assert!(!studio.branches().unwrap().iter().any(|b| b.name == "try"));
+    // And it does not come back from anywhere.
+    assert!(world.sync(&mut laptop).new_branches.is_empty());
+    assert!(world.sync(&mut studio).new_branches.is_empty());
+    assert_eq!(laptop.branches().unwrap().len(), 1);
+}
+
+#[test]
+fn cleanup_frees_a_deleted_branch_another_device_still_has() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "a.wav", "a");
+    laptop.commit("a", &[]).unwrap();
+    laptop.create_branch("try", None).unwrap();
+    laptop.switch("try").unwrap();
+    write(&laptop, "idea.wav", noise(300_000, 5));
+    laptop.commit("idea", &[]).unwrap();
+    laptop.switch("main").unwrap();
+    world.sync(&mut laptop);
+    let mut studio = world.clone("studio");
+    world.sync(&mut studio);
+
+    // The studio has not heard of the deletion yet.
+    laptop.delete_branch("try").unwrap();
+    world.sync(&mut laptop);
+    let freed = laptop.cleanup(None, false).unwrap();
+    assert_eq!(freed.versions, 1);
+    assert!(freed.bytes >= 290_000, "{freed:?}");
+
+    // Should the studio save more on it after all, it all comes back.
+    studio.switch("try").unwrap();
+    write(&studio, "more.wav", "more");
+    studio.commit("more", &[]).unwrap();
+    studio.switch("main").unwrap();
+    world.sync(&mut studio);
+    let report = world.sync(&mut laptop);
+    assert_eq!(report.new_branches, ["try"]);
+    laptop.switch("try").unwrap();
+    assert_eq!(read(&laptop, "idea.wav"), noise(300_000, 5));
+}
+
+#[test]
+fn new_work_outlives_a_deletion_elsewhere() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "a.wav", "a");
+    laptop.commit("a", &[]).unwrap();
+    laptop.create_branch("idea", None).unwrap();
+    world.sync(&mut laptop);
+    let mut studio = world.clone("studio");
+
+    // The studio keeps working on the branch the laptop is about to delete.
+    studio.switch("idea").unwrap();
+    write(&studio, "idea.wav", "more");
+    studio.commit("more", &[]).unwrap();
+    studio.switch("main").unwrap();
+    world.sync(&mut studio);
+    laptop.delete_branch("idea").unwrap();
+
+    let report = world.sync(&mut laptop);
+    assert_eq!(report.new_branches, ["idea"]);
+    assert!(world.sync(&mut studio).deleted_branches.is_empty());
+    laptop.switch("idea").unwrap();
+    assert_eq!(read(&laptop, "idea.wav"), b"more");
+}
+
+#[test]
+fn background_sync_leaves_the_folder_alone() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "song.wav", "v1");
+    laptop.commit("v1", &[]).unwrap();
+    world.sync(&mut laptop);
+    let mut studio = world.clone("studio");
+    write(&laptop, "song.wav", "v2");
+    laptop.commit("v2", &[]).unwrap();
+    world.sync(&mut laptop);
+
+    let report = studio.sync_background(&world.remote, &mut |_| {}).unwrap();
+    assert_eq!(report.received_versions, 1);
+    assert!(report.updated_branches.is_empty());
+    assert_eq!(read(&studio, "song.wav"), b"v1");
+    assert_eq!(studio.sync_state().unwrap().waiting, ["main"]);
+
+    let report = studio.update_current().unwrap();
+    assert_eq!(report.updated_branches, ["main"]);
+    assert_eq!(read(&studio, "song.wav"), b"v2");
+    assert!(studio.sync_state().unwrap().waiting.is_empty());
+}
+
+#[test]
+fn pruned_versions_travel_without_their_data() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    for take in 1..=3u64 {
+        write(&laptop, "vocal.wav", noise(400_000, take * 2 + 1));
+        laptop.commit(&format!("take {take}"), &[]).unwrap();
+    }
+    assert_eq!(laptop.cleanup(Some(i64::MAX), false).unwrap().contents, 2);
+    let report = world.sync(&mut laptop);
+    assert_eq!(report.sent_versions, 3);
+    assert!(report.uploaded_bytes < 800_000, "{report:?}");
+
+    let studio = world.clone("studio");
+    assert_eq!(studio.log(None).unwrap().len(), 3);
+    assert_eq!(read(&studio, "vocal.wav"), noise(400_000, 7));
+    assert!(matches!(
+        studio.read_file("HEAD~1", "vocal.wav", &mut Vec::new()),
+        Err(Error::ContentPruned(_))
+    ));
+}
+
+#[test]
+fn a_long_history_is_fetched_once_and_in_full() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    for i in 0..80 {
+        write(&laptop, "notes.txt", format!("draft {i}"));
+        laptop.commit(&format!("draft {i}"), &[]).unwrap();
+    }
+    world.sync(&mut laptop);
+    world.remote.reads.lock().unwrap().clear();
+
+    let studio = world.clone("studio");
+    assert_eq!(studio.log(None).unwrap().len(), 80);
+    let reads = world.remote.reads.lock().unwrap();
+    let snapshots: Vec<&String> = reads
+        .iter()
+        .filter(|r| r.starts_with("snapshots/"))
+        .collect();
+    assert_eq!(snapshots.len(), 80, "every version is read exactly once");
 }
 
 /// Runs only against a real server, e.g. a local wsgidav:

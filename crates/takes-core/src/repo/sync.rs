@@ -10,16 +10,20 @@
 //! snapshots/<id>.snap          one version: metadata, files and their chunks
 //! comments/<uid>.json          one comment
 //! resolved/<uid>               marks that comment resolved
+//! meta/<uid>.json              one change to a file's labels, tempo or key
 //! tags/<hex name>              a tag (first writer wins)
 //! refs/<device>/b-<hex name>   branch heads of one device, written only by it
+//! refs/<device>/d-<hex name>   branches that device deleted, at which version
 //! devices/<device>.json        a device's display name
 //! ```
 //!
 //! Since each device only ever writes its own refs, no locking is needed and
 //! nothing is overwritten. Branches that moved on two devices show up as
 //! diverged and are merged like any branch, as `<branch>@<device>`.
+//!
+//! Requests run several at a time: on WebDAV each one costs a round trip.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -32,7 +36,7 @@ use super::{BRANCH, Graph, Repo, TAG, UPSERT_REF, now_secs, snapshot_id};
 use crate::error::{Error, Result};
 use crate::hash::Hash;
 use crate::model::{Entry, Tree};
-use crate::remote::{RemoteConfig, Storage};
+use crate::remote::{RemoteConfig, Storage, parallel};
 use crate::store;
 use crate::worktree::META_DIR;
 
@@ -43,7 +47,11 @@ const MARKER: &str = "takes-remote.json";
 const PACK_TARGET: u64 = 64 * 1024 * 1024;
 /// Neighbouring chunks closer than this are downloaded in one request.
 const MERGE_GAP: u64 = 256 * 1024;
-const MAX_REQUEST: u64 = 32 * 1024 * 1024;
+/// Largest download request; several run at once.
+const MAX_REQUEST: u64 = 16 * 1024 * 1024;
+/// Earlier versions listed in each version file, so a long history can be
+/// downloaded many versions at a time instead of parent after parent.
+const ANCESTOR_HINTS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncPhase {
@@ -85,10 +93,15 @@ pub struct SyncReport {
     pub received_versions: u64,
     pub comments_sent: u64,
     pub comments_received: u64,
+    /// Changes to labels, tempo and key of files.
+    pub notes_sent: u64,
+    pub notes_received: u64,
     /// Branches moved forward to another device's newer version.
     pub updated_branches: Vec<String>,
     /// Branches that existed only on other devices until now.
     pub new_branches: Vec<String>,
+    /// Branches another device deleted, removed here too.
+    pub deleted_branches: Vec<String>,
     pub diverged: Vec<Diverged>,
     pub current_blocked: Option<Blocked>,
 }
@@ -100,8 +113,9 @@ pub struct SyncState {
     /// Versions saved here and not yet sent.
     pub unsent_versions: u64,
     pub diverged: Vec<Diverged>,
-    /// Branches with a newer version from another device not applied yet
-    /// (the current branch while there are unsaved changes).
+    /// Branches with a newer version from another device not applied yet:
+    /// the current branch, while it has unsaved changes or after a
+    /// background sync (see [`Repo::update_current`]).
     pub waiting: Vec<String>,
     pub last_sync: Option<i64>,
 }
@@ -130,6 +144,13 @@ struct SnapshotFile {
     created_at: i64,
     entries: Vec<EntryFile>,
     blobs: Vec<BlobFile>,
+    /// Some earlier versions (beyond `parents`); only a download hint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ancestors: Vec<String>,
+    /// Contents the sender had removed to free space before sending, so
+    /// their chunks are not on the remote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pruned: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -170,6 +191,16 @@ struct CommentFile {
     created_at: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct MetaFile {
+    uid: String,
+    blob: String,
+    field: String,
+    value: String,
+    at: i64,
+    author: String,
+}
+
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let json = serde_json::to_vec(value).map_err(|e| Error::Corrupt(e.to_string()))?;
     Ok(zstd::bulk::compress(&json, 3)?)
@@ -181,8 +212,19 @@ fn decode<T: DeserializeOwned>(what: &str, data: &[u8]) -> Result<T> {
     serde_json::from_slice(&json).map_err(|_| Error::Corrupt(format!("remote {what} is damaged")))
 }
 
+fn json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    serde_json::to_vec(value).map_err(|e| Error::Corrupt(e.to_string()))
+}
+
 fn parse_hash(hex: &str) -> Result<Hash> {
     Hash::from_hex(hex).ok_or_else(|| Error::Corrupt(format!("bad hash on the remote: {hex}")))
+}
+
+fn ref_file(id: Hash) -> Result<Vec<u8>> {
+    json(&RefFile {
+        snapshot: id.to_hex(),
+        updated_at: now_secs(),
+    })
 }
 
 /// Branch and tag names as file names: hex of the UTF-8 bytes, so any name
@@ -209,21 +251,22 @@ fn read_marker(storage: &dyn Storage) -> Result<Option<Marker>> {
     };
     let marker: Marker = serde_json::from_slice(&data).map_err(|_| Error::NotARemote)?;
     if marker.format > FORMAT {
-        return Err(Error::Corrupt(
-            "the remote was written by a newer version of takes".into(),
-        ));
+        return Err(Error::TooNew("the remote"));
     }
     Ok(Some(marker))
 }
 
 /// Projects in the folders directly under `storage` (for "open from remote").
 pub fn find_remote_projects(storage: &dyn Storage) -> Result<Vec<String>> {
-    let mut found = Vec::new();
-    for name in storage.list("")? {
-        if storage.read(&format!("{name}/{MARKER}"))?.is_some() {
-            found.push(name);
-        }
-    }
+    let found = parallel(
+        storage.list("")?,
+        |name| {
+            let marker = storage.read(&format!("{name}/{MARKER}"))?;
+            Ok(marker.map(|_| name))
+        },
+        |_| Ok(()),
+    )?;
+    let mut found: Vec<String> = found.into_iter().flatten().collect();
     found.sort();
     Ok(found)
 }
@@ -278,6 +321,17 @@ enum Relation {
     /// Theirs contains ours (or we don't have the branch): take it.
     Behind(Option<Hash>),
     Diverged,
+    /// We don't have the branch because it was deleted after this version.
+    Deleted,
+}
+
+/// A run of nearby chunks of one pack, downloaded in one request.
+struct Range {
+    path: String,
+    start: u64,
+    len: u64,
+    /// (offset, length, hash)
+    chunks: Vec<(u64, u64, Hash)>,
 }
 
 impl Repo {
@@ -299,8 +353,9 @@ impl Repo {
         self.conn.execute_batch(
             "BEGIN;
              DELETE FROM remote_packs; DELETE FROM remote_chunks; DELETE FROM remote_snapshots;
-             DELETE FROM remote_refs; DELETE FROM remote_seen;
+             DELETE FROM remote_refs; DELETE FROM remote_seen; DELETE FROM remote_deleted;
              UPDATE comments SET pushed = 0, resolution_pushed = 0;
+             UPDATE meta_events SET pushed = 0;
              DELETE FROM config WHERE key = 'sync.last';
              COMMIT;",
         )?;
@@ -376,23 +431,54 @@ impl Repo {
     // ---- sync ---------------------------------------------------------------
 
     /// Gets new versions and comments from other devices, moves branches
-    /// forward where possible, then sends ours.
+    /// forward where possible (the current one too, replacing its files if
+    /// nothing is unsaved), then sends ours.
     pub fn sync(
         &mut self,
         storage: &dyn Storage,
         progress: &mut dyn FnMut(SyncProgress),
+    ) -> Result<SyncReport> {
+        self.sync_with(storage, progress, true)
+    }
+
+    /// Like [`Repo::sync`], but never touches the working folder: a newer
+    /// version of the current branch waits for [`Repo::update_current`].
+    /// Meant for automatic syncing while a DAW may have the files open.
+    pub fn sync_background(
+        &mut self,
+        storage: &dyn Storage,
+        progress: &mut dyn FnMut(SyncProgress),
+    ) -> Result<SyncReport> {
+        self.sync_with(storage, progress, false)
+    }
+
+    fn sync_with(
+        &mut self,
+        storage: &dyn Storage,
+        progress: &mut dyn FnMut(SyncProgress),
+        update_current: bool,
     ) -> Result<SyncReport> {
         progress(SyncProgress {
             phase: SyncPhase::Connecting,
             done: 0,
             total: 0,
         });
+        let _lock = self.lock_shared()?;
         self.connect_remote(storage)?;
         let mut report = SyncReport::default();
         self.fetch(storage, &mut report, progress)?;
-        self.integrate(&mut report)?;
+        self.integrate(&mut report, update_current)?;
         self.push(storage, &mut report, progress)?;
         self.set_config("sync.last", &now_secs().to_string())?;
+        Ok(report)
+    }
+
+    /// Applies what the last sync fetched to the current branch and its
+    /// files (after [`Repo::sync_background`]). Works offline.
+    pub fn update_current(&mut self) -> Result<SyncReport> {
+        let _lock = self.lock_shared()?;
+        let mut report = SyncReport::default();
+        self.integrate(&mut report, true)?;
         Ok(report)
     }
 
@@ -433,7 +519,7 @@ impl Repo {
                 repo.conn
                     .execute("UPDATE head SET branch = ?1 WHERE id = 1", [first])?;
             }
-            repo.integrate(&mut report)?;
+            repo.integrate(&mut report, true)?;
             repo.set_config("sync.last", &now_secs().to_string())?;
             Ok((repo, report))
         })();
@@ -502,11 +588,10 @@ impl Repo {
     }
 
     fn has_snapshot(&self, id: Hash) -> Result<bool> {
-        Ok(self
+        let mut stmt = self
             .conn
-            .query_row("SELECT 1 FROM snapshots WHERE id = ?1", [id], |_| Ok(()))
-            .optional()?
-            .is_some())
+            .prepare_cached("SELECT 1 FROM snapshots WHERE id = ?1")?;
+        Ok(stmt.exists([id])?)
     }
 
     /// Heads of other devices we know of (and have locally).
@@ -531,12 +616,26 @@ impl Repo {
 
     fn relation(&self, graph: &Graph, head: &RemoteHead) -> Result<Relation> {
         Ok(match self.ref_target(BRANCH, &head.branch)? {
+            None if self.deletion_covers(graph, &head.branch, head.id)? => Relation::Deleted,
             None => Relation::Behind(None),
             Some(ours) if ours == head.id => Relation::Same,
             Some(ours) if graph.is_ancestor(head.id, ours) => Relation::Ahead,
             Some(ours) if graph.is_ancestor(ours, head.id) => Relation::Behind(Some(ours)),
             Some(_) => Relation::Diverged,
         })
+    }
+
+    /// Whether `head` of `branch` is gone for good: the branch was deleted,
+    /// here or on another device, at a version that already contains it.
+    pub(super) fn deletion_covers(&self, graph: &Graph, branch: &str, head: Hash) -> Result<bool> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT snapshot_id FROM deleted_branches WHERE name = ?1
+             UNION SELECT snapshot_id FROM remote_deleted WHERE name = ?1",
+        )?;
+        let deleted_at = stmt
+            .query_map([branch], |r| r.get::<_, Hash>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(deleted_at.into_iter().any(|t| graph.is_ancestor(head, t)))
     }
 
     // ---- fetch --------------------------------------------------------------
@@ -548,16 +647,22 @@ impl Repo {
             stmt.query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for file in storage.list("packs")? {
-            let Some(name) = file.strip_suffix(".idx") else {
-                continue;
-            };
-            if known.contains(name) {
-                continue;
-            }
-            let Some(data) = storage.read(&format!("packs/{file}"))? else {
-                continue;
-            };
+        let new: Vec<String> = storage
+            .list("packs")?
+            .into_iter()
+            .filter_map(|file| file.strip_suffix(".idx").map(str::to_owned))
+            .filter(|name| !known.contains(name))
+            .collect();
+        let indexes = parallel(
+            new,
+            |name| {
+                let data = storage.read(&format!("packs/{name}.idx"))?;
+                Ok((name, data))
+            },
+            |_| Ok(()),
+        )?;
+        for (name, data) in indexes {
+            let Some(data) = data else { continue };
             let index: PackIndex = decode("pack index", &data)?;
             let tx = self.conn.transaction()?;
             {
@@ -572,7 +677,7 @@ impl Repo {
                         *len as i64
                     ])?;
                 }
-                tx.execute("INSERT INTO remote_packs (name) VALUES (?1)", [name])?;
+                tx.execute("INSERT INTO remote_packs (name) VALUES (?1)", [&name])?;
             }
             tx.commit()?;
         }
@@ -598,74 +703,92 @@ impl Repo {
         self.refresh_remote_index(storage)?;
         let (me, _) = self.device()?;
 
-        let mut device_names = HashMap::new();
-        for file in storage.list("devices")? {
-            if let Some(id) = file.strip_suffix(".json")
-                && let Some(data) = storage.read(&format!("devices/{file}"))?
-                && let Ok(device) = serde_json::from_slice::<DeviceFile>(&data)
-            {
-                device_names.insert(id.to_owned(), device.name);
-            }
-        }
+        let device_files: Vec<String> = storage
+            .list("devices")?
+            .into_iter()
+            .filter(|f| f.ends_with(".json"))
+            .collect();
+        let device_names: HashMap<String, String> = parallel(
+            device_files,
+            |file| {
+                let name = storage
+                    .read(&format!("devices/{file}"))?
+                    .and_then(|d| serde_json::from_slice::<DeviceFile>(&d).ok())
+                    .map(|d| d.name);
+                Ok((file.trim_end_matches(".json").to_owned(), name))
+            },
+            |_| Ok(()),
+        )?
+        .into_iter()
+        .filter_map(|(id, name)| Some((id, name?)))
+        .collect();
 
-        // Branch heads of other devices.
+        // Branch heads and deletions of other devices.
+        let devices: Vec<String> = storage
+            .list("refs")?
+            .into_iter()
+            .filter(|d| *d != me)
+            .collect();
+        let listed = parallel(
+            devices,
+            |device| {
+                let files = storage.list(&format!("refs/{device}"))?;
+                Ok(files.into_iter().map(move |f| (device.clone(), f)))
+            },
+            |_| Ok(()),
+        )?;
+        let ref_files = parallel(
+            listed.into_iter().flatten().collect(),
+            |(device, file)| {
+                let data = storage.read(&format!("refs/{device}/{file}"))?;
+                Ok((device, file, data))
+            },
+            |_| Ok(()),
+        )?;
         let mut heads: Vec<(String, String, Hash)> = Vec::new();
-        for device in storage.list("refs")? {
-            if device == me {
-                continue;
-            }
-            for file in storage.list(&format!("refs/{device}"))? {
-                let Some(branch) = file.strip_prefix("b-").and_then(file_to_name) else {
-                    continue;
-                };
-                let Some(data) = storage.read(&format!("refs/{device}/{file}"))? else {
-                    continue;
-                };
-                let reference: RefFile = serde_json::from_slice(&data)
-                    .map_err(|_| Error::Corrupt(format!("remote branch {branch} is damaged")))?;
-                heads.push((device.clone(), branch, parse_hash(&reference.snapshot)?));
-            }
-        }
-
-        let mut tags: Vec<(String, Hash)> = Vec::new();
-        for file in storage.list("tags")? {
-            let Some(name) = file_to_name(&file) else {
+        let mut deletions: Vec<(String, String, Hash)> = Vec::new();
+        for (device, file, data) in ref_files {
+            let (list, encoded) = if let Some(name) = file.strip_prefix("b-") {
+                (&mut heads, name)
+            } else if let Some(name) = file.strip_prefix("d-") {
+                (&mut deletions, name)
+            } else {
                 continue;
             };
-            if self.ref_target(TAG, &name)?.is_some() {
+            let (Some(data), Some(branch)) = (data, file_to_name(encoded)) else {
                 continue;
-            }
-            if let Some(data) = storage.read(&format!("tags/{file}"))? {
-                let reference: RefFile = serde_json::from_slice(&data)
-                    .map_err(|_| Error::Corrupt(format!("remote tag {name} is damaged")))?;
-                tags.push((name, parse_hash(&reference.snapshot)?));
-            }
+            };
+            let reference: RefFile = serde_json::from_slice(&data)
+                .map_err(|_| Error::Corrupt(format!("remote branch {branch} is damaged")))?;
+            list.push((device, branch, parse_hash(&reference.snapshot)?));
         }
 
-        // Versions we lack, following parents until we reach known ones.
-        let mut files: HashMap<Hash, SnapshotFile> = HashMap::new();
-        let mut queue: Vec<Hash> = heads
+        let mut new_tags = Vec::new();
+        for file in storage.list("tags")? {
+            if let Some(name) = file_to_name(&file)
+                && self.ref_target(TAG, &name)?.is_none()
+            {
+                new_tags.push((file, name));
+            }
+        }
+        let mut tags: Vec<(String, Hash)> = Vec::new();
+        for (name, data) in parallel(
+            new_tags,
+            |(file, name)| Ok((name, storage.read(&format!("tags/{file}"))?)),
+            |_| Ok(()),
+        )? {
+            let Some(data) = data else { continue };
+            let reference: RefFile = serde_json::from_slice(&data)
+                .map_err(|_| Error::Corrupt(format!("remote tag {name} is damaged")))?;
+            tags.push((name, parse_hash(&reference.snapshot)?));
+        }
+
+        let starts: Vec<Hash> = heads
             .iter()
             .map(|h| h.2)
             .chain(tags.iter().map(|t| t.1))
             .collect();
-        while let Some(id) = queue.pop() {
-            if files.contains_key(&id) || self.has_snapshot(id)? {
-                continue;
-            }
-            let data = storage
-                .read(&format!("snapshots/{}.snap", id.to_hex()))?
-                .ok_or_else(|| {
-                    Error::Corrupt(format!("version {} is missing on the remote", id.short()))
-                })?;
-            let file: SnapshotFile = decode("version", &data)?;
-            verify_snapshot(id, &file)?;
-            for parent in &file.parents {
-                queue.push(parse_hash(parent)?);
-            }
-            files.insert(id, file);
-        }
-
+        let files = self.fetch_snapshots(storage, &starts)?;
         self.download_chunks(storage, &files, report, progress)?;
 
         // Store versions, parents first.
@@ -676,17 +799,27 @@ impl Repo {
         }
         tx.commit()?;
         report.received_versions += order.len() as u64;
+        self.update_pruned(&files)?;
 
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM remote_refs WHERE device != ?1", [&me])?;
-        for (device, branch, id) in &heads {
-            let name = device_names
+        tx.execute("DELETE FROM remote_deleted", [])?;
+        let device_name = |device: &str| {
+            device_names
                 .get(device)
                 .cloned()
-                .unwrap_or_else(|| device[..8.min(device.len())].to_owned());
+                .unwrap_or_else(|| device[..8.min(device.len())].to_owned())
+        };
+        for (device, branch, id) in &heads {
             tx.execute(
                 "INSERT OR REPLACE INTO remote_refs (device, device_name, name, snapshot_id) VALUES (?1, ?2, ?3, ?4)",
-                params![device, name, branch, id],
+                params![device, device_name(device), branch, id],
+            )?;
+        }
+        for (device, branch, id) in &deletions {
+            tx.execute(
+                "INSERT OR REPLACE INTO remote_deleted (device, name, snapshot_id) VALUES (?1, ?2, ?3)",
+                params![device, branch, id],
             )?;
         }
         for (name, id) in &tags {
@@ -698,7 +831,76 @@ impl Repo {
         }
         tx.commit()?;
 
-        self.fetch_comments(storage, report)
+        self.fetch_comments(storage, report)?;
+        self.fetch_meta(storage, report)
+    }
+
+    /// Downloads the versions leading to `starts` that we lack. Each version
+    /// names some earlier ones, so a long history comes in parallel rounds.
+    fn fetch_snapshots(
+        &self,
+        storage: &dyn Storage,
+        starts: &[Hash],
+    ) -> Result<HashMap<Hash, SnapshotFile>> {
+        let on_remote = self.remote_snapshots()?;
+        let mut files: HashMap<Hash, SnapshotFile> = HashMap::new();
+        let mut asked: HashSet<Hash> = HashSet::new();
+        let mut wanted: Vec<Hash> = starts.to_vec();
+        loop {
+            let mut batch = Vec::new();
+            for id in wanted.drain(..) {
+                if asked.insert(id) && !self.has_snapshot(id)? {
+                    batch.push(id);
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            let got = parallel(
+                batch,
+                |id| {
+                    let data = storage
+                        .read(&format!("snapshots/{}.snap", id.to_hex()))?
+                        .ok_or_else(|| {
+                            Error::Corrupt(format!(
+                                "version {} is missing on the remote",
+                                id.short()
+                            ))
+                        })?;
+                    let file: SnapshotFile = decode("version", &data)?;
+                    verify_snapshot(id, &file)?;
+                    Ok((id, file))
+                },
+                |_| Ok(()),
+            )?;
+            for (id, file) in got {
+                for parent in &file.parents {
+                    wanted.push(parse_hash(parent)?);
+                }
+                // Hints are only followed to versions the remote has.
+                wanted.extend(
+                    file.ancestors
+                        .iter()
+                        .filter_map(|a| Hash::from_hex(a))
+                        .filter(|a| on_remote.contains(a)),
+                );
+                files.insert(id, file);
+            }
+        }
+        // Keep only what the heads really lead to, whatever the hints said.
+        let mut keep = HashSet::new();
+        let mut stack = starts.to_vec();
+        while let Some(id) = stack.pop() {
+            if let Some(file) = files.get(&id)
+                && keep.insert(id)
+            {
+                for parent in &file.parents {
+                    stack.push(parse_hash(parent)?);
+                }
+            }
+        }
+        files.retain(|id, _| keep.contains(id));
+        Ok(files)
     }
 
     fn download_chunks(
@@ -710,7 +912,12 @@ impl Repo {
     ) -> Result<()> {
         let mut needed: HashSet<Hash> = HashSet::new();
         for file in files.values() {
-            for blob in &file.blobs {
+            let pruned: HashSet<&str> = file.pruned.iter().map(String::as_str).collect();
+            for blob in file
+                .blobs
+                .iter()
+                .filter(|b| !pruned.contains(b.hash.as_str()))
+            {
                 for chunk in &blob.chunks {
                     let hash = parse_hash(chunk)?;
                     if !self.store.has_chunk(&hash) {
@@ -721,14 +928,12 @@ impl Repo {
         }
         let mut by_pack: BTreeMap<String, Vec<(u64, u64, Hash)>> = BTreeMap::new();
         let mut total = 0;
+        let mut find = self
+            .conn
+            .prepare_cached("SELECT pack, offset, length FROM remote_chunks WHERE hash = ?1")?;
         for hash in needed {
-            let (pack, offset, len): (String, i64, i64) = self
-                .conn
-                .query_row(
-                    "SELECT pack, offset, length FROM remote_chunks WHERE hash = ?1",
-                    [hash],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
+            let (pack, offset, len): (String, i64, i64) = find
+                .query_row([hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .optional()?
                 .ok_or_else(|| {
                     Error::Corrupt(format!(
@@ -743,18 +948,11 @@ impl Repo {
                 .push((offset as u64, len as u64, hash));
         }
 
-        let mut done = 0;
-        progress(SyncProgress {
-            phase: SyncPhase::Downloading,
-            done,
-            total,
-        });
+        let mut ranges = Vec::new();
         for (pack, mut chunks) in by_pack {
             chunks.sort();
-            let path = format!("packs/{pack}.pack");
             let mut i = 0;
             while i < chunks.len() {
-                // One request for a run of nearby chunks.
                 let start = chunks[i].0;
                 let mut j = i + 1;
                 while j < chunks.len()
@@ -763,23 +961,72 @@ impl Repo {
                 {
                     j += 1;
                 }
-                let end = chunks[j - 1].0 + chunks[j - 1].1;
-                let data = storage.read_range(&path, start, end - start)?;
-                for &(offset, len, hash) in &chunks[i..j] {
-                    let from = (offset - start) as usize;
-                    self.store
-                        .put_raw(&hash, &data[from..from + len as usize])?;
-                    done += len;
+                ranges.push(Range {
+                    path: format!("packs/{pack}.pack"),
+                    start,
+                    len: chunks[j - 1].0 + chunks[j - 1].1 - start,
+                    chunks: chunks[i..j].to_vec(),
+                });
+                i = j;
+            }
+        }
+
+        let mut done = 0;
+        progress(SyncProgress {
+            phase: SyncPhase::Downloading,
+            done,
+            total,
+        });
+        let store = &self.store;
+        parallel(
+            ranges,
+            |range| {
+                let data = storage.read_range(&range.path, range.start, range.len)?;
+                let mut stored = 0;
+                for &(offset, len, hash) in &range.chunks {
+                    let from = (offset - range.start) as usize;
+                    store.put_raw(&hash, &data[from..from + len as usize])?;
+                    stored += len;
                 }
-                report.downloaded_bytes += end - start;
+                Ok((range.len, stored))
+            },
+            |&(fetched, stored)| {
+                done += stored;
+                report.downloaded_bytes += fetched;
                 progress(SyncProgress {
                     phase: SyncPhase::Downloading,
                     done,
                     total,
                 });
-                i = j;
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
+    /// After a download: contents we now have completely are no longer
+    /// pruned; contents the sender had removed are pruned here too.
+    fn update_pruned(&self, files: &HashMap<Hash, SnapshotFile>) -> Result<()> {
+        let mut checked = HashSet::new();
+        let tx = self.conn.unchecked_transaction()?;
+        for file in files.values() {
+            for blob in &file.blobs {
+                if !checked.insert(blob.hash.as_str()) {
+                    continue;
+                }
+                let mut complete = true;
+                for chunk in &blob.chunks {
+                    complete &= self.store.has_chunk(&parse_hash(chunk)?);
+                }
+                let sql = if complete {
+                    "DELETE FROM pruned_blobs WHERE hash = ?1"
+                } else {
+                    "INSERT OR IGNORE INTO pruned_blobs (hash) VALUES (?1)"
+                };
+                tx.execute(sql, [parse_hash(&blob.hash)?])?;
             }
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -789,15 +1036,22 @@ impl Repo {
             stmt.query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for file in storage.list("comments")? {
-            let path = format!("comments/{file}");
-            if seen.contains(&path) || !file.ends_with(".json") {
-                continue;
-            }
-            let Some(data) = storage.read(&path)? else {
-                continue;
-            };
-            let Ok(c) = serde_json::from_slice::<CommentFile>(&data) else {
+        let unseen: Vec<String> = storage
+            .list("comments")?
+            .into_iter()
+            .map(|file| format!("comments/{file}"))
+            .filter(|path| path.ends_with(".json") && !seen.contains(path))
+            .collect();
+        let read = parallel(
+            unseen,
+            |path| {
+                let data = storage.read(&path)?;
+                Ok((path, data))
+            },
+            |_| Ok(()),
+        )?;
+        for (path, data) in read {
+            let Some(c) = data.and_then(|d| serde_json::from_slice::<CommentFile>(&d).ok()) else {
                 continue;
             };
             let snapshot = parse_hash(&c.snapshot)?;
@@ -843,18 +1097,95 @@ impl Repo {
         Ok(())
     }
 
+    fn fetch_meta(&mut self, storage: &dyn Storage, report: &mut SyncReport) -> Result<()> {
+        let seen: HashSet<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path FROM remote_seen WHERE path LIKE 'meta/%'")?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let unseen: Vec<String> = storage
+            .list("meta")?
+            .into_iter()
+            .map(|file| format!("meta/{file}"))
+            .filter(|path| path.ends_with(".json") && !seen.contains(path))
+            .collect();
+        let conn = &self.conn;
+        let mut imported = 0;
+        parallel(
+            unseen,
+            |path| {
+                let data = storage.read(&path)?;
+                Ok((path, data))
+            },
+            |(path, data)| {
+                let event = data
+                    .as_deref()
+                    .and_then(|d| serde_json::from_slice::<MetaFile>(d).ok())
+                    .and_then(|m| {
+                        Some(super::meta::MetaEvent {
+                            blob: Hash::from_hex(&m.blob)?,
+                            uid: m.uid,
+                            field: m.field,
+                            value: m.value,
+                            at: m.at,
+                            author: m.author,
+                        })
+                    });
+                if let Some(event) = event
+                    && self.import_meta(&event)?
+                {
+                    imported += 1;
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
+                    [path],
+                )?;
+                Ok(())
+            },
+        )?;
+        report.notes_received += imported;
+        Ok(())
+    }
+
     // ---- integrate ------------------------------------------------------------
 
-    /// Moves local branches forward to newer versions from other devices and
-    /// reports branches that diverged.
-    fn integrate(&mut self, report: &mut SyncReport) -> Result<()> {
+    /// Moves local branches forward to newer versions from other devices,
+    /// drops branches other devices deleted, and reports branches that
+    /// diverged. The current branch moves only with `update_current`.
+    fn integrate(&mut self, report: &mut SyncReport, update_current: bool) -> Result<()> {
         let graph = self.graph()?;
         let current = self.current_branch()?;
+
+        // Deleted elsewhere, and nothing new was saved on it here since.
+        let deletions: Vec<(String, Hash)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT name, snapshot_id FROM remote_deleted")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (name, deleted_at) in deletions {
+            if name != current
+                && let Some(ours) = self.ref_target(BRANCH, &name)?
+                && graph.is_ancestor(ours, deleted_at)
+            {
+                self.conn.execute(
+                    "DELETE FROM refs WHERE kind = ?1 AND name = ?2",
+                    [BRANCH, &name],
+                )?;
+                push_unique(&mut report.deleted_branches, &name);
+            }
+        }
+
         for head in self.remote_heads()? {
             match self.relation(&graph, &head)? {
-                Relation::Same | Relation::Ahead => {}
-                Relation::Diverged => report.diverged.push(diverged(&head)),
+                Relation::Same | Relation::Ahead | Relation::Diverged | Relation::Deleted => {}
                 Relation::Behind(ours) if head.branch == current => {
+                    if !update_current {
+                        continue;
+                    }
                     match self.fast_forward_current(ours, head.id) {
                         Ok(()) => {}
                         Err(Error::DirtyWorktree(_)) => {
@@ -882,6 +1213,13 @@ impl Repo {
                 Relation::Behind(ours) => {
                     self.conn
                         .execute(UPSERT_REF, params![BRANCH, head.branch, head.id])?;
+                    if ours.is_none() {
+                        // Someone saved new work on a branch deleted here.
+                        self.conn.execute(
+                            "DELETE FROM deleted_branches WHERE name = ?1",
+                            [&head.branch],
+                        )?;
+                    }
                     push_unique(
                         if ours.is_some() {
                             &mut report.updated_branches
@@ -936,6 +1274,8 @@ impl Repo {
         let order = parents_first_graph(&graph, &missing);
 
         // File contents the remote lacks.
+        let pruned = self.pruned()?;
+        let mut unavailable: HashSet<Hash> = HashSet::new();
         let mut chunks: Vec<Hash> = Vec::new();
         let mut queued: HashSet<Hash> = HashSet::new();
         let mut blobs_seen: HashSet<Hash> = HashSet::new();
@@ -944,7 +1284,19 @@ impl Repo {
                 if !blobs_seen.insert(entry.blob) {
                     continue;
                 }
-                for chunk in self.blob(entry.blob)?.chunks {
+                let blob = self.blob(entry.blob)?;
+                if pruned.contains(&entry.blob) {
+                    // Removed here to free space; fine if the remote has it.
+                    let mut on_remote = true;
+                    for chunk in &blob.chunks {
+                        on_remote &= self.remote_has_chunk(*chunk)?;
+                    }
+                    if !on_remote {
+                        unavailable.insert(entry.blob);
+                    }
+                    continue;
+                }
+                for chunk in blob.chunks {
                     if queued.insert(chunk) && !self.remote_has_chunk(chunk)? {
                         chunks.push(chunk);
                     }
@@ -997,31 +1349,73 @@ impl Repo {
         }
 
         // Versions, after all their contents are on the remote.
-        for id in &order {
-            let data = encode(&self.snapshot_file(*id)?)?;
-            storage.write(&format!("snapshots/{}.snap", id.to_hex()), &data)?;
-            report.uploaded_bytes += data.len() as u64;
-            self.conn.execute(
-                "INSERT OR IGNORE INTO remote_snapshots (id) VALUES (?1)",
-                [id],
-            )?;
-            report.sent_versions += 1;
-        }
+        let files = order
+            .iter()
+            .map(|id| {
+                Ok((
+                    *id,
+                    encode(&self.snapshot_file(&graph, *id, &unavailable)?)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let conn = &self.conn;
+        parallel(
+            files,
+            |(id, data)| {
+                storage.write(&format!("snapshots/{}.snap", id.to_hex()), &data)?;
+                Ok((id, data.len() as u64))
+            },
+            |&(id, len)| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_snapshots (id) VALUES (?1)",
+                    [id],
+                )?;
+                report.uploaded_bytes += len;
+                report.sent_versions += 1;
+                Ok(())
+            },
+        )?;
 
         self.push_comments(storage, report)?;
+        self.push_meta(storage, report)?;
         self.push_refs(storage)
     }
 
+    fn push_meta(&mut self, storage: &dyn Storage, report: &mut SyncReport) -> Result<()> {
+        let conn = &self.conn;
+        parallel(
+            self.unpushed_meta()?,
+            |event| {
+                let path = format!("meta/{}.json", event.uid);
+                let file = MetaFile {
+                    blob: event.blob.to_hex(),
+                    uid: event.uid,
+                    field: event.field,
+                    value: event.value,
+                    at: event.at,
+                    author: event.author,
+                };
+                storage.write(&path, &json(&file)?)?;
+                Ok((file.uid, path))
+            },
+            |(uid, path)| {
+                conn.execute("UPDATE meta_events SET pushed = 1 WHERE uid = ?1", [uid])?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
+                    [path],
+                )?;
+                report.notes_sent += 1;
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
     fn remote_has_chunk(&self, chunk: Hash) -> Result<bool> {
-        Ok(self
+        let mut stmt = self
             .conn
-            .query_row(
-                "SELECT 1 FROM remote_chunks WHERE hash = ?1",
-                [chunk],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
+            .prepare_cached("SELECT 1 FROM remote_chunks WHERE hash = ?1")?;
+        Ok(stmt.exists([chunk])?)
     }
 
     /// Uploads a pack, then its index; returns the bytes sent.
@@ -1059,14 +1453,23 @@ impl Repo {
         Ok(pack.size + index.len() as u64)
     }
 
-    fn snapshot_file(&self, id: Hash) -> Result<SnapshotFile> {
+    fn snapshot_file(
+        &self,
+        graph: &Graph,
+        id: Hash,
+        unavailable: &HashSet<Hash>,
+    ) -> Result<SnapshotFile> {
         let snapshot = self.snapshot(id)?;
         let tree = self.tree(id)?;
         let mut blobs = Vec::new();
+        let mut pruned = Vec::new();
         let mut seen = HashSet::new();
         for entry in tree.values() {
             if seen.insert(entry.blob) {
                 let blob = self.blob(entry.blob)?;
+                if unavailable.contains(&blob.hash) {
+                    pruned.push(blob.hash.to_hex());
+                }
                 blobs.push(BlobFile {
                     hash: blob.hash.to_hex(),
                     size: blob.size,
@@ -1089,6 +1492,8 @@ impl Repo {
                 })
                 .collect(),
             blobs,
+            ancestors: ancestor_hints(graph, id).iter().map(Hash::to_hex).collect(),
+            pruned,
         })
     }
 
@@ -1114,18 +1519,25 @@ impl Repo {
             })?
             .collect::<rusqlite::Result<_>>()?
         };
-        for (id, comment) in pending {
-            let path = format!("comments/{}.json", comment.uid);
-            let json = serde_json::to_vec(&comment).map_err(|e| Error::Corrupt(e.to_string()))?;
-            storage.write(&path, &json)?;
-            self.conn
-                .execute("UPDATE comments SET pushed = 1 WHERE id = ?1", [id])?;
-            self.conn.execute(
-                "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
-                [&path],
-            )?;
-            report.comments_sent += 1;
-        }
+        let conn = &self.conn;
+        parallel(
+            pending,
+            |(id, comment)| {
+                let path = format!("comments/{}.json", comment.uid);
+                storage.write(&path, &json(&comment)?)?;
+                Ok((id, path))
+            },
+            |(id, path)| {
+                conn.execute("UPDATE comments SET pushed = 1 WHERE id = ?1", [id])?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
+                    [path],
+                )?;
+                report.comments_sent += 1;
+                Ok(())
+            },
+        )?;
+
         let resolved: Vec<(i64, String)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT id, uid FROM comments WHERE resolved = 1 AND resolution_pushed = 0 AND pushed = 1",
@@ -1133,22 +1545,29 @@ impl Repo {
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for (id, uid) in resolved {
-            let path = format!("resolved/{uid}");
-            storage.write(&path, b"1")?;
-            self.conn.execute(
-                "UPDATE comments SET resolution_pushed = 1 WHERE id = ?1",
-                [id],
-            )?;
-            self.conn.execute(
-                "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
-                [&path],
-            )?;
-        }
+        parallel(
+            resolved,
+            |(id, uid)| {
+                let path = format!("resolved/{uid}");
+                storage.write(&path, b"1")?;
+                Ok((id, path))
+            },
+            |(id, path)| {
+                conn.execute(
+                    "UPDATE comments SET resolution_pushed = 1 WHERE id = ?1",
+                    [id],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
+                    [path],
+                )?;
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
-    /// Publishes our branch heads and tags, and our device name.
+    /// Publishes our branch heads, deleted branches, tags and device name.
     fn push_refs(&mut self, storage: &dyn Storage) -> Result<()> {
         let (me, my_name) = self.device()?;
         let device_path = format!("devices/{me}.json");
@@ -1159,20 +1578,14 @@ impl Repo {
             .read(&device_path)?
             .and_then(|d| serde_json::from_slice::<DeviceFile>(&d).ok());
         if current.as_ref() != Some(&device) {
-            let json = serde_json::to_vec(&device).map_err(|e| Error::Corrupt(e.to_string()))?;
-            storage.write(&device_path, &json)?;
+            storage.write(&device_path, &json(&device)?)?;
         }
 
         let remote_tags: HashSet<String> = storage.list("tags")?.into_iter().collect();
         for (name, id) in self.refs(TAG)? {
             let file = name_to_file(&name);
             if !remote_tags.contains(&file) {
-                let json = serde_json::to_vec(&RefFile {
-                    snapshot: id.to_hex(),
-                    updated_at: now_secs(),
-                })
-                .map_err(|e| Error::Corrupt(e.to_string()))?;
-                storage.write(&format!("tags/{file}"), &json)?;
+                storage.write(&format!("tags/{file}"), &ref_file(id)?)?;
             }
         }
 
@@ -1189,16 +1602,25 @@ impl Repo {
         for (name, id) in self.refs(BRANCH)? {
             let file = format!("b-{}", name_to_file(&name));
             if pushed.get(&name) != Some(&id) || !published.contains(&file) {
-                let json = serde_json::to_vec(&RefFile {
-                    snapshot: id.to_hex(),
-                    updated_at: now_secs(),
-                })
-                .map_err(|e| Error::Corrupt(e.to_string()))?;
-                storage.write(&format!("{dir}/{file}"), &json)?;
+                storage.write(&format!("{dir}/{file}"), &ref_file(id)?)?;
                 self.conn.execute(
                     "INSERT OR REPLACE INTO remote_refs (device, device_name, name, snapshot_id) VALUES (?1, ?2, ?3, ?4)",
                     params![me, my_name, name, id],
                 )?;
+            }
+            keep.insert(file);
+        }
+        let deleted: Vec<(String, Hash)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT name, snapshot_id FROM deleted_branches")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (name, id) in deleted {
+            let file = format!("d-{}", name_to_file(&name));
+            if !published.contains(&file) {
+                storage.write(&format!("{dir}/{file}"), &ref_file(id)?)?;
             }
             keep.insert(file);
         }
@@ -1245,6 +1667,26 @@ fn push_unique(list: &mut Vec<String>, name: &str) {
     if !list.iter().any(|n| n == name) {
         list.push(name.to_owned());
     }
+}
+
+/// Up to [`ANCESTOR_HINTS`] versions before the parents of `id`, nearest first.
+fn ancestor_hints(graph: &Graph, id: Hash) -> Vec<Hash> {
+    let parents = graph.parents_of(&id);
+    let mut seen: HashSet<Hash> = parents.iter().copied().chain([id]).collect();
+    let mut queue: VecDeque<Hash> = parents.iter().copied().collect();
+    let mut hints = Vec::new();
+    while let Some(next) = queue.pop_front() {
+        for &parent in graph.parents_of(&next) {
+            if seen.insert(parent) {
+                hints.push(parent);
+                if hints.len() == ANCESTOR_HINTS {
+                    return hints;
+                }
+                queue.push_back(parent);
+            }
+        }
+    }
+    hints
 }
 
 /// Checks a downloaded version against its id, so a damaged or forged file

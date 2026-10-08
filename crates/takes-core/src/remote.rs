@@ -66,7 +66,8 @@ impl RemoteConfig {
 }
 
 /// Minimal file storage. Paths are relative, `/`-separated and ASCII.
-pub trait Storage: Send {
+/// Sync calls it from several threads at once.
+pub trait Storage: Send + Sync {
     /// Names of the entries directly inside `dir` ("" = the root); empty if
     /// `dir` does not exist.
     fn list(&self, dir: &str) -> Result<Vec<String>>;
@@ -77,6 +78,72 @@ pub trait Storage: Send {
     fn write_file(&self, path: &str, local: &Path) -> Result<()>;
     /// Removes a file; fine if it does not exist.
     fn delete(&self, path: &str) -> Result<()>;
+}
+
+/// Requests in flight at once: remote calls mostly wait on the network (one
+/// small file per version or comment), and servers dislike big bursts.
+const PARALLEL: usize = 6;
+
+/// Runs `work` on every item using a few threads and returns the results in
+/// order. `each` sees every result on the calling thread as it arrives (for
+/// progress and database writes, which must stay on one thread). Stops at
+/// the first error.
+pub(crate) fn parallel<T: Send, R: Send>(
+    items: Vec<T>,
+    work: impl Fn(T) -> Result<R> + Sync,
+    mut each: impl FnMut(&R) -> Result<()>,
+) -> Result<Vec<R>> {
+    let total = items.len();
+    if total <= 1 {
+        return items
+            .into_iter()
+            .map(|item| {
+                let result = work(item)?;
+                each(&result)?;
+                Ok(result)
+            })
+            .collect();
+    }
+    let queue = Mutex::new(items.into_iter().enumerate());
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..PARALLEL.min(total) {
+            let (tx, queue, stop, work) = (tx.clone(), &queue, &stop, &work);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+                    let Some((i, item)) = next else { break };
+                    let result = work(item);
+                    if result.is_err() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    if tx.send((i, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        let mut results: Vec<Option<R>> = (0..total).map(|_| None).collect();
+        let mut failure = None;
+        for (i, result) in rx {
+            match result.and_then(|r| each(&r).map(|()| r)) {
+                Ok(r) => results[i] = Some(r),
+                Err(e) => {
+                    stop.store(true, Ordering::Relaxed);
+                    failure.get_or_insert(e);
+                }
+            }
+        }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(results
+                .into_iter()
+                .map(|r| r.expect("every item ran"))
+                .collect()),
+        }
+    })
 }
 
 // ---- folder -------------------------------------------------------------------
@@ -182,6 +249,8 @@ impl Storage for FolderStorage {
 
 // ---- WebDAV -------------------------------------------------------------------
 
+const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>"#;
+
 pub struct WebDavStorage {
     /// `https://host[:port]` plus any base path the user gave, no trailing `/`.
     server: String,
@@ -274,28 +343,35 @@ impl WebDavStorage {
 
     /// Creates the collections leading to `segments` (MKCOL per level).
     fn ensure_collections(&self, segments: &[String]) -> Result<()> {
+        // One at a time: parallel uploads into a new folder would all race
+        // to create it, and some servers answer the losers with an error.
+        let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         for depth in 1..=segments.len() {
             let url = self.url(&segments[..depth], true);
-            if self
-                .made
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(&url)
-            {
+            if made.contains(&url) {
                 continue;
             }
             let response = self.send("MKCOL", &url, &[], ())?;
-            // 201 created; 405 already exists (some servers say 409/301 too).
+            // 201 created; 405 already exists (some servers say 301 too).
             match response.status().as_u16() {
                 200..=299 | 301 | 405 => {}
+                // Another device may have just created it.
+                _ if self.collection_exists(&url)? => {}
                 _ => return Err(self.fail("cannot create folder", &url, &response)),
             }
-            self.made
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(url);
+            made.insert(url);
         }
         Ok(())
+    }
+
+    fn collection_exists(&self, url: &str) -> Result<bool> {
+        let response = self.send(
+            "PROPFIND",
+            url,
+            &[("Depth", "0"), ("Content-Type", "application/xml")],
+            PROPFIND,
+        )?;
+        Ok(matches!(response.status().as_u16(), 200 | 207))
     }
 
     fn put(&self, path: &str, body: impl ureq::AsSendBody) -> Result<()> {
@@ -317,7 +393,7 @@ impl Storage for WebDavStorage {
             "PROPFIND",
             &url,
             &[("Depth", "1"), ("Content-Type", "application/xml")],
-            r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>"#,
+            PROPFIND,
         )?;
         match response.status().as_u16() {
             404 => return Ok(Vec::new()),

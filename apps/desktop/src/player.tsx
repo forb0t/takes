@@ -9,8 +9,11 @@ import {
   type ReactNode,
 } from "react";
 import { api, errorText, type Analysis, type Comment } from "./api";
+import { ImageViewer } from "./ImageViewer";
+import { PdfViewer } from "./PdfViewer";
+import { TextViewer } from "./TextViewer";
 import { Icon } from "./ui";
-import { formatDate, formatTime, isAudio, splitPath } from "./util";
+import { formatDate, formatTime, previewKind, splitPath, type PreviewKind } from "./util";
 import { Waveform } from "./Waveform";
 
 /** A file version to play. `rev: null` is the file as it is on disk now. */
@@ -22,17 +25,21 @@ export interface Track {
   label: string;
 }
 
-/** One track, or two for an A/B comparison. */
+/** One file version, or two to compare. */
 interface Session {
   id: number;
   tracks: Track[];
+  kind: PreviewKind;
 }
 
 interface PlayerApi {
+  /** Audio in the player bar. */
   session: Session | null;
-  play: (track: Track) => void;
-  compare: (a: Track, b: Track) => void;
+  /** An image, text or PDF on screen; independent, so music keeps playing. */
+  viewer: Session | null;
+  open: (tracks: Track[]) => void;
   close: () => void;
+  closeViewer: () => void;
 }
 
 const PlayerContext = createContext<PlayerApi | null>(null);
@@ -46,62 +53,93 @@ function usePlayer(): PlayerApi {
 const sameTrack = (a: Track | undefined, b: Track) =>
   !!a && a.root === b.root && a.rev === b.rev && a.path === b.path;
 
+const sameTracks = (s: Session | null, tracks: Track[]) =>
+  !!s && s.tracks.length === tracks.length && tracks.every((t, i) => sameTrack(s.tracks[i], t));
+
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
+  const [viewer, setViewer] = useState<Session | null>(null);
   const next = useRef(0);
-  const play = useCallback((track: Track) => setSession({ id: ++next.current, tracks: [track] }), []);
-  const compare = useCallback((a: Track, b: Track) => setSession({ id: ++next.current, tracks: [a, b] }), []);
+  const open = useCallback((tracks: Track[]) => {
+    const kind = previewKind(tracks[0].path);
+    if (!kind) return;
+    const opened = { id: ++next.current, tracks, kind };
+    if (kind === "audio") setSession(opened);
+    else setViewer(opened);
+  }, []);
   const close = useCallback(() => setSession(null), []);
-  return <PlayerContext.Provider value={{ session, play, compare, close }}>{children}</PlayerContext.Provider>;
+  const closeViewer = useCallback(() => setViewer(null), []);
+  return (
+    <PlayerContext.Provider value={{ session, viewer, open, close, closeViewer }}>{children}</PlayerContext.Provider>
+  );
 }
 
-/** Play button for audio files; renders nothing for other files. */
+const VERB: Record<PreviewKind, string> = { audio: "Слушать", image: "Посмотреть", text: "Читать", pdf: "Открыть" };
+
+/** Play button for audio, view button for images, texts and PDFs. */
 export function PlayButton({ track, text }: { track: Track; text?: string }) {
-  const { session, play } = usePlayer();
-  if (!isAudio(track.path)) return null;
-  const active = session?.tracks.length === 1 && sameTrack(session.tracks[0], track);
+  const { session, viewer, open } = usePlayer();
+  const kind = previewKind(track.path);
+  if (!kind) return null;
+  const active = sameTracks(kind === "audio" ? session : viewer, [track]);
   return (
     <button
       className={`play-btn ${active ? "active" : ""} ${text ? "with-text" : ""}`}
-      title={`Слушать: ${track.label}`}
+      title={`${VERB[kind]}: ${track.label}`}
       onClick={(e) => {
         e.stopPropagation();
-        play(track);
+        open([track]);
       }}
     >
-      <Icon name="play" size={12} />
+      <Icon name={kind === "audio" ? "play" : kind === "image" ? "image" : "doc"} size={12} />
       {text && <span>{text}</span>}
     </button>
   );
 }
 
-/** Starts an A/B comparison of two versions of an audio file. */
+/** Compares two versions: A/B listening, a curtain over images, a text diff. */
 export function CompareButton({ a, b }: { a: Track; b: Track }) {
-  const { session, compare } = usePlayer();
-  if (!isAudio(a.path) || !isAudio(b.path)) return null;
-  const active =
-    session?.tracks.length === 2 && sameTrack(session.tracks[0], a) && sameTrack(session.tracks[1], b);
+  const { session, viewer, open } = usePlayer();
+  const kind = previewKind(a.path);
+  if (!kind || kind !== previewKind(b.path)) return null;
+  const active = sameTracks(kind === "audio" ? session : viewer, [a, b]);
   return (
     <button
       className={`play-btn with-text ab-btn ${active ? "active" : ""}`}
       title={`Сравнить: A — ${a.label}, B — ${b.label}`}
       onClick={(e) => {
         e.stopPropagation();
-        compare(a, b);
+        open([a, b]);
       }}
     >
-      A/B
+      {kind === "text" ? "Разница" : "A/B"}
     </button>
   );
 }
 
 export function PlayerBar() {
-  const { session, close } = usePlayer();
-  if (!session) return null;
-  return <Player key={session.id} tracks={session.tracks} onClose={close} />;
+  const { session, viewer, close, closeViewer } = usePlayer();
+  return (
+    <>
+      {session && <Player key={session.id} tracks={session.tracks} onClose={close} />}
+      {viewer?.kind === "image" && <ImageViewer key={viewer.id} tracks={viewer.tracks} onClose={closeViewer} />}
+      {viewer?.kind === "text" && <TextViewer key={viewer.id} tracks={viewer.tracks} onClose={closeViewer} />}
+      {viewer?.kind === "pdf" && <PdfViewer key={viewer.id} tracks={viewer.tracks} onClose={closeViewer} />}
+    </>
+  );
 }
 
 // ---- the player ---------------------------------------------------------------
+
+/** "128 BPM", "Am" as set by hand, else "≈127 BPM", "Am" as estimated. */
+function tempoAndKey(a: Analysis): string[] {
+  const out: string[] = [];
+  if (a.manualBpm != null) out.push(`${a.manualBpm} BPM`);
+  else if (a.bpm != null) out.push(`≈${Math.round(a.bpm)} BPM`);
+  const key = a.manualKey ?? a.key;
+  if (key) out.push(key);
+  return out;
+}
 
 interface Deck {
   src: string | null;
@@ -299,7 +337,14 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
               <button key={i} className={i === active ? "active" : ""} onClick={() => switchTo(i)} title={t.label}>
                 <span className="ab-letter">{i === 0 ? "A" : "B"}</span>
                 <span className="ab-label">{t.label}</span>
-                {lufs[i] !== null && <span className="ab-lufs">{lufs[i]!.toFixed(1)} LUFS</span>}
+                {lufs[i] !== null && (
+                  <span
+                    className="ab-lufs"
+                    title={decks[i].analysis ? tempoAndKey(decks[i].analysis!).join(" · ") : undefined}
+                  >
+                    {lufs[i]!.toFixed(1)} LUFS
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -325,8 +370,12 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
               </span>
             </label>
           )}
-          {!ab && deck.analysis?.lufs != null && (
-            <span className="muted nowrap">{deck.analysis.lufs.toFixed(1)} LUFS</span>
+          {!ab && deck.analysis && (
+            <span className="muted nowrap" title="Темп и тональность: заданные вручную или определённые автоматически (≈)">
+              {[deck.analysis.lufs != null && `${deck.analysis.lufs.toFixed(1)} LUFS`, ...tempoAndKey(deck.analysis)]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
           )}
           <button
             className={`chip ${panelOpen ? "chip-on" : ""}`}
@@ -358,6 +407,7 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
         <div className="wave-wrap">
           <Waveform
             analysis={deck.analysis}
+            ghost={ab ? decks[1 - active].analysis : null}
             durationMs={durationMs}
             positionMs={positionMs}
             comments={deck.comments}

@@ -1,13 +1,15 @@
+import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText, type Change, type Overview, type Snapshot } from "../api";
 import { CompareButton, PlayButton } from "../player";
-import { Empty, Icon, KindBadge, PathLabel, PromptDialog } from "../ui";
+import { Empty, FileLabels, Icon, KindBadge, PathLabel, PromptDialog, useToast } from "../ui";
 import {
   formatDate,
   formatFullDate,
   formatSize,
   isMerge,
   labelsById,
+  plural,
   short,
   type Label,
 } from "../util";
@@ -141,10 +143,12 @@ function VersionDetail({
   onChanged: () => void;
 }) {
   const root = overview.root;
+  const toast = useToast();
   const actions = useFileActions(root, onChanged);
   const [changes, setChanges] = useState<Change[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"tag" | "branch" | null>(null);
+  const [zipping, setZipping] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -159,6 +163,26 @@ function VersionDetail({
 
   const id = snapshot.id;
   const label = `версия ${short(id)}`;
+
+  async function exportZip() {
+    const name = labels?.find((l) => l.kind === "tag")?.text ?? short(id);
+    const dest = await save({
+      title: "Сохранить версию как ZIP",
+      defaultPath: `${overview.name} ${name}.zip`.replace(/[\\/:*?"<>|]/g, "-"),
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    });
+    if (!dest) return;
+    setZipping(true);
+    try {
+      const files = await api.exportZip(root, id, dest);
+      toast(`Сохранено в ZIP: ${files} ${plural(files, "файл", "файла", "файлов")}`, "ok");
+    } catch (e) {
+      toast(errorText(e), "error");
+    } finally {
+      setZipping(false);
+    }
+  }
+
   return (
     <div className="detail">
       <div className="detail-head">
@@ -181,6 +205,14 @@ function VersionDetail({
           <button className="btn" onClick={() => setDialog("branch")}>
             <Icon name="branch" /> Новая ветка отсюда
           </button>
+          <button
+            className="btn"
+            disabled={zipping}
+            onClick={exportZip}
+            title="Все файлы этой версии одним архивом, например чтобы отправить на лейбл"
+          >
+            <Icon name="archive" /> {zipping ? "Упаковываю…" : "Скачать ZIP"}
+          </button>
         </div>
       </div>
 
@@ -197,45 +229,52 @@ function VersionDetail({
             <div key={c.path} className="row">
               <KindBadge kind={c.kind} />
               <PathLabel path={c.path} />
+              <FileLabels labels={c.labels} />
               {c.size !== null && <span className="size">{formatSize(c.size)}</span>}
-              <div className="row-actions">
-                {c.kind === "modified" && snapshot.parents[0] && (
-                  <CompareButton
-                    a={{ root, rev: snapshot.parents[0], path: c.path, label: `До: ${short(snapshot.parents[0])}` }}
-                    b={{ root, rev: id, path: c.path, label: `Версия ${short(id)}` }}
-                  />
-                )}
-                {rev && (
-                  <PlayButton
-                    track={{
-                      root,
-                      rev,
-                      path: c.path,
-                      label: c.kind === "deleted" ? `До удаления, ${short(rev)}` : `Версия ${short(id)}`,
-                    }}
-                  />
-                )}
-                <div className="action-slot wide">
+              {c.pruned ? (
+                <span className="muted nowrap" title="Содержимое удалено при очистке места">
+                  файл удалён при очистке
+                </span>
+              ) : (
+                <div className="row-actions">
+                  {c.kind === "modified" && snapshot.parents[0] && (
+                    <CompareButton
+                      a={{ root, rev: snapshot.parents[0], path: c.path, label: `До: ${short(snapshot.parents[0])}` }}
+                      b={{ root, rev: id, path: c.path, label: `Версия ${short(id)}` }}
+                    />
+                  )}
                   {rev && (
-                    <button
-                      className="btn btn-small btn-ghost"
-                      title="Вернуть файл в папку проекта в этом виде"
-                      onClick={() => actions.restore(c.path, rev)}
-                    >
-                      <Icon name="restore" size={14} /> Вернуть
-                    </button>
+                    <PlayButton
+                      track={{
+                        root,
+                        rev,
+                        path: c.path,
+                        label: c.kind === "deleted" ? `До удаления, ${short(rev)}` : `Версия ${short(id)}`,
+                      }}
+                    />
                   )}
-                  {c.kind !== "deleted" && (
-                    <button
-                      className="btn btn-small btn-ghost"
-                      title="Положить эту версию рядом с текущим файлом"
-                      onClick={() => actions.saveCopy(c.path, id, short(id))}
-                    >
-                      <Icon name="copy" size={14} /> Копия
-                    </button>
-                  )}
+                  <div className="action-slot wide">
+                    {rev && (
+                      <button
+                        className="btn btn-small btn-ghost"
+                        title="Вернуть файл в папку проекта в этом виде"
+                        onClick={() => actions.restore(c.path, rev)}
+                      >
+                        <Icon name="restore" size={14} /> Вернуть
+                      </button>
+                    )}
+                    {c.kind !== "deleted" && (
+                      <button
+                        className="btn btn-small btn-ghost"
+                        title="Положить эту версию рядом с текущим файлом"
+                        onClick={() => actions.saveCopy(c.path, id, short(id))}
+                      >
+                        <Icon name="copy" size={14} /> Копия
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           );
         })}

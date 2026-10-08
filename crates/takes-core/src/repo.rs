@@ -14,9 +14,14 @@ use crate::model::{
     Branch, Change, ChangeKind, Comment, Entry, FileVersion, Snapshot, Stats, Tag, Tree, diff_trees,
 };
 use crate::store::{self, Blob, ObjectStore};
-use crate::worktree::{self, META_DIR};
+use crate::worktree::{self, META_DIR, WorkFile};
 
+mod archive;
+mod cleanup;
+mod meta;
 mod sync;
+pub use cleanup::Cleanup;
+pub use meta::FileMeta;
 pub use sync::{
     Blocked, Diverged, SyncPhase, SyncProgress, SyncReport, SyncState, find_remote_projects,
     is_remote_project,
@@ -91,6 +96,39 @@ impl Repo {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Held (shared) while chunks are written or read; cleanup holds it
+    /// exclusively, so it never deletes data an operation is about to use.
+    /// Works across processes (the app and the CLI).
+    fn lock_shared(&self) -> Result<File> {
+        let file = self.lock_file()?;
+        file.lock_shared()?;
+        Ok(file)
+    }
+
+    fn lock_exclusive(&self) -> Result<File> {
+        let file = self.lock_file()?;
+        // A process started from another thread holds a copy of a just
+        // released lock until it execs, so retry briefly before giving up.
+        for _ in 0..20 {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
+        Err(Error::Busy)
+    }
+
+    fn lock_file(&self) -> Result<File> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(self.root.join(META_DIR).join("lock"))?)
     }
 
     // ---- settings -------------------------------------------------------
@@ -184,24 +222,36 @@ impl Repo {
             return Err(Error::BranchExists(name.into()));
         }
         let id = self.resolve(from.unwrap_or("HEAD"))?;
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO refs (kind, name, snapshot_id) VALUES (?1, ?2, ?3)",
             params![BRANCH, name, id],
         )?;
+        tx.execute("DELETE FROM deleted_branches WHERE name = ?1", [name])?;
+        tx.commit()?;
         Ok(id)
     }
 
+    /// Deletes a branch (its versions stay until cleanup). Other devices drop
+    /// it too on their next sync, unless they saved something new on it.
     pub fn delete_branch(&mut self, name: &str) -> Result<()> {
         if name == self.current_branch()? {
             return Err(Error::CannotDeleteCurrentBranch(name.into()));
         }
-        let deleted = self.conn.execute(
+        let head = self
+            .ref_target(BRANCH, name)?
+            .ok_or_else(|| Error::NoSuchBranch(name.into()))?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "DELETE FROM refs WHERE kind = ?1 AND name = ?2",
             [BRANCH, name],
         )?;
-        if deleted == 0 {
-            return Err(Error::NoSuchBranch(name.into()));
-        }
+        tx.execute(
+            "INSERT OR REPLACE INTO deleted_branches (name, snapshot_id, deleted_at)
+             VALUES (?1, ?2, ?3)",
+            params![name, head, now_secs()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -380,22 +430,56 @@ impl Repo {
                 None => return Ok(Vec::new()),
             },
         };
-        self.graph()?
+        let graph = self.graph()?;
+        let mut meta: HashMap<Hash, (String, String, i64)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, message, author, created_at FROM snapshots")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        graph
             .topo_order(head)
             .into_iter()
-            .map(|id| self.snapshot(id))
+            .map(|id| {
+                let (message, author, created_at) = meta
+                    .remove(&id)
+                    .ok_or_else(|| Error::Corrupt(format!("missing version {id}")))?;
+                Ok(Snapshot {
+                    id,
+                    parents: graph.parents_of(&id).to_vec(),
+                    message,
+                    author,
+                    created_at,
+                })
+            })
             .collect()
     }
 
     /// Versions in which `path` was added, changed or deleted, newest first.
     pub fn file_history(&self, path: &str, rev: Option<&str>) -> Result<Vec<FileVersion>> {
+        let entries: HashMap<Hash, Entry> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT snapshot_id, blob_hash, size FROM snapshot_entries WHERE path = ?1",
+            )?;
+            stmt.query_map([path], |r| {
+                Ok((
+                    r.get(0)?,
+                    Entry {
+                        blob: r.get(1)?,
+                        size: r.get::<_, i64>(2)? as u64,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
         let mut versions = Vec::new();
         for snapshot in self.log(rev)? {
-            let entry = self.entry(snapshot.id, path)?;
-            let before = match snapshot.parents.first() {
-                Some(parent) => self.entry(*parent, path)?,
-                None => None,
-            };
+            let entry = entries.get(&snapshot.id).copied();
+            let before = snapshot
+                .parents
+                .first()
+                .and_then(|p| entries.get(p).copied());
             let kind = match (before, entry) {
                 (None, Some(_)) => ChangeKind::Added,
                 (Some(_), None) => ChangeKind::Deleted,
@@ -433,7 +517,8 @@ impl Repo {
     /// outside the project, without touching the working folder.
     pub fn read_file(&self, rev: &str, path: &str, out: &mut impl Write) -> Result<()> {
         let entry = self.file_at(rev, path)?;
-        self.store.write_blob(&self.blob(entry.blob)?, out)
+        let _lock = self.lock_shared()?;
+        self.store.write_blob(&self.content(path, &entry)?, out)
     }
 
     pub fn export(&self, rev: &str, path: &str, dest: &Path) -> Result<()> {
@@ -441,6 +526,28 @@ impl Repo {
         self.read_file(rev, path, &mut out)?;
         out.flush()?;
         Ok(())
+    }
+
+    /// Contents whose data cleanup removed.
+    pub fn pruned(&self) -> Result<HashSet<Hash>> {
+        let mut stmt = self.conn.prepare_cached("SELECT hash FROM pruned_blobs")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn is_pruned(&self, blob: Hash) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT 1 FROM pruned_blobs WHERE hash = ?1")?;
+        Ok(stmt.exists([blob])?)
+    }
+
+    /// The stored content of `path`, unless cleanup removed it.
+    fn content(&self, path: &str, entry: &Entry) -> Result<Blob> {
+        if self.is_pruned(entry.blob)? {
+            return Err(Error::ContentPruned(path.into()));
+        }
+        self.blob(entry.blob)
     }
 
     fn blob(&self, hash: Hash) -> Result<Blob> {
@@ -467,67 +574,130 @@ impl Repo {
         worktree::to_abs(&self.root, path)
     }
 
-    fn scan_worktree(&self) -> Result<Tree> {
-        let files = worktree::scan(&self.root)?;
-        let mut cache = HashMap::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT path, size, mtime_ns, blob_hash FROM worktree_cache")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    (
-                        r.get::<_, i64>(1)? as u64,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, Hash>(3)?,
-                    ),
-                ))
-            })?;
-            for row in rows {
-                let (path, cached) = row?;
-                cache.insert(path, cached);
-            }
-        }
-        let mut tree = Tree::new();
-        for file in files {
-            let blob = match cache.get(&file.path) {
-                Some(&(size, mtime, hash)) if size == file.size && mtime == file.mtime_ns => hash,
-                _ => {
-                    let (hash, _) = store::hash_file(&file.abs)?;
-                    self.cache_put(&file.path, file.size, file.mtime_ns, hash)?;
-                    hash
+    /// Content hashes of working files, keyed by path, valid while size and
+    /// mtime stay the same.
+    fn worktree_cache(&self) -> Result<HashMap<String, (u64, i64, Hash)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, size, mtime_ns, blob_hash FROM worktree_cache")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (
+                    r.get::<_, i64>(1)? as u64,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Hash>(3)?,
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Compares the working folder with `base`. A file is read only when its
+    /// size matches the saved one and the stat cache cannot vouch for it;
+    /// `hash` reads it (and may store it on the way). Deleted files come
+    /// without a [`WorkFile`].
+    fn compare_worktree(
+        &self,
+        base: &Tree,
+        mut hash: impl FnMut(&WorkFile) -> Result<Hash>,
+    ) -> Result<Vec<(Change, Option<WorkFile>)>> {
+        let cache = self.worktree_cache()?;
+        let mut hashed = Vec::new();
+        let mut changes = Vec::new();
+        let mut present = HashSet::new();
+        for file in worktree::scan(&self.root)? {
+            let kind = match base.get(&file.path) {
+                None => Some(ChangeKind::Added),
+                // Another size is another content, so there is no need to
+                // read it: status stays cheap while a DAW records into a file.
+                Some(saved) if saved.size != file.size => Some(ChangeKind::Modified),
+                Some(saved) => {
+                    let blob = match cache.get(&file.path) {
+                        Some(&(size, mtime, blob))
+                            if size == file.size && mtime == file.mtime_ns =>
+                        {
+                            blob
+                        }
+                        _ => {
+                            let blob = hash(&file)?;
+                            hashed.push((file.path.clone(), file.size, file.mtime_ns, blob));
+                            blob
+                        }
+                    };
+                    (blob != saved.blob).then_some(ChangeKind::Modified)
                 }
             };
-            tree.insert(
-                file.path,
-                Entry {
-                    blob,
-                    size: file.size,
-                },
-            );
+            present.insert(file.path.clone());
+            if let Some(kind) = kind {
+                let change = Change {
+                    path: file.path.clone(),
+                    kind,
+                };
+                changes.push((change, Some(file)));
+            }
         }
-        Ok(tree)
+        for path in base.keys().filter(|p| !present.contains(*p)) {
+            let change = Change {
+                path: path.clone(),
+                kind: ChangeKind::Deleted,
+            };
+            changes.push((change, None));
+        }
+        changes.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+        self.cache_put_all(&hashed)?;
+        Ok(changes)
     }
 
     fn cache_put(&self, path: &str, size: u64, mtime_ns: i64, hash: Hash) -> Result<()> {
-        if mtime_ns > now_ns() - RACY_WINDOW_NS {
-            self.conn
-                .execute("DELETE FROM worktree_cache WHERE path = ?1", [path])?;
+        self.cache_put_all(&[(path.to_owned(), size, mtime_ns, hash)])
+    }
+
+    /// Remembers content hashes of working files (path, size, mtime, hash).
+    fn cache_put_all(&self, files: &[(String, u64, i64, Hash)]) -> Result<()> {
+        if files.is_empty() {
             return Ok(());
         }
-        self.conn.execute(
-            "INSERT INTO worktree_cache (path, size, mtime_ns, blob_hash) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (path) DO UPDATE SET
-                 size = excluded.size, mtime_ns = excluded.mtime_ns, blob_hash = excluded.blob_hash",
-            params![path, size as i64, mtime_ns, hash],
-        )?;
+        let racy = now_ns() - RACY_WINDOW_NS;
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut put = tx.prepare_cached(
+                "INSERT INTO worktree_cache (path, size, mtime_ns, blob_hash) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (path) DO UPDATE SET
+                     size = excluded.size, mtime_ns = excluded.mtime_ns, blob_hash = excluded.blob_hash",
+            )?;
+            let mut forget = tx.prepare_cached("DELETE FROM worktree_cache WHERE path = ?1")?;
+            for (path, size, mtime_ns, hash) in files {
+                if *mtime_ns > racy {
+                    forget.execute([path])?;
+                } else {
+                    put.execute(params![path, *size as i64, mtime_ns, hash])?;
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
     /// Differences between the working folder and the current version.
     pub fn status(&self) -> Result<Vec<Change>> {
-        Ok(diff_trees(&self.head_tree()?, &self.scan_worktree()?))
+        let changes =
+            self.compare_worktree(&self.head_tree()?, |f| Ok(store::hash_file(&f.abs)?.0))?;
+        Ok(changes.into_iter().map(|(change, _)| change).collect())
+    }
+
+    /// Stores a working file, refusing one that changes while it is read
+    /// (a DAW still writing a bounce).
+    fn store_file(&self, file: &WorkFile) -> Result<Blob> {
+        let blob = self.store.put_file(&file.abs)?;
+        let after = fs::symlink_metadata(&file.abs)?;
+        if blob.size != file.size
+            || after.len() != file.size
+            || worktree::mtime_ns(&after) != file.mtime_ns
+        {
+            return Err(Error::FileChanging(vec![file.path.clone()]));
+        }
+        Ok(blob)
     }
 
     fn ensure_clean(&self) -> Result<()> {
@@ -542,23 +712,45 @@ impl Repo {
     /// Saves a new version of the changed files under `paths` (files or
     /// folders; empty = everything) on the current branch.
     pub fn commit(&mut self, message: &str, paths: &[&str]) -> Result<Hash> {
+        let _lock = self.lock_shared()?;
         let branch = self.current_branch()?;
         let head = self.head()?;
         let mut tree = self.head_tree()?;
-        let selected: Vec<Change> = diff_trees(&tree, &self.scan_worktree()?)
+        let selected = |path: &str| paths.is_empty() || paths.iter().any(|p| path_matches(p, path));
+        // A selected file that has to be read to find out whether it changed
+        // is stored right away, so every file is read once.
+        let mut stored: HashMap<String, Blob> = HashMap::new();
+        let changes: Vec<_> = self
+            .compare_worktree(&tree, |file| {
+                if !selected(&file.path) {
+                    return Ok(store::hash_file(&file.abs)?.0);
+                }
+                let blob = self.store_file(file)?;
+                let hash = blob.hash;
+                stored.insert(file.path.clone(), blob);
+                Ok(hash)
+            })?
             .into_iter()
-            .filter(|c| paths.is_empty() || paths.iter().any(|p| path_matches(p, &c.path)))
+            .filter(|(c, _)| selected(&c.path))
             .collect();
-        if selected.is_empty() {
+        if changes.is_empty() {
             return Err(Error::NothingToCommit);
         }
         let mut blobs = Vec::new();
-        for change in selected {
-            if change.kind == ChangeKind::Deleted {
+        let mut fresh = Vec::new();
+        for (change, file) in changes {
+            let Some(file) = file else {
                 tree.remove(&change.path);
                 continue;
-            }
-            let blob = self.store.put_file(&self.abs(&change.path)?)?;
+            };
+            let blob = match stored.remove(&change.path) {
+                Some(blob) => blob,
+                None => {
+                    let blob = self.store_file(&file)?;
+                    fresh.push((file.path, file.size, file.mtime_ns, blob.hash));
+                    blob
+                }
+            };
             tree.insert(
                 change.path,
                 Entry {
@@ -569,7 +761,9 @@ impl Repo {
             blobs.push(blob);
         }
         let parents: Vec<Hash> = head.into_iter().collect();
-        self.write_snapshot(&branch, &parents, message, &tree, &blobs)
+        let id = self.write_snapshot(&branch, &parents, message, &tree, &blobs)?;
+        self.cache_put_all(&fresh)?;
+        Ok(id)
     }
 
     fn write_snapshot(
@@ -626,6 +820,7 @@ impl Repo {
         let target = self
             .ref_target(BRANCH, name)?
             .ok_or_else(|| Error::NoSuchBranch(name.into()))?;
+        let _lock = self.lock_shared()?;
         self.ensure_clean()?;
         self.apply_tree(&self.head_tree()?, &self.tree(target)?)?;
         self.conn
@@ -644,6 +839,7 @@ impl Repo {
         })?;
         let target = dest.unwrap_or(path);
         let abs = self.abs(target)?;
+        let _lock = self.lock_shared()?;
         if !force && abs.exists() {
             let current = if abs.is_file() {
                 Some(store::hash_file(&abs)?.0)
@@ -678,6 +874,13 @@ impl Repo {
         }
         if !blocked.is_empty() {
             return Err(Error::WouldOverwrite(blocked));
+        }
+        let pruned = self.pruned()?;
+        if let Some((path, _)) = to
+            .iter()
+            .find(|(p, e)| pruned.contains(&e.blob) && from.get(*p) != Some(*e))
+        {
+            return Err(Error::ContentPruned(path.clone()));
         }
         // Check everything up front so a file held open by a DAW stops the
         // whole operation before anything has changed.
@@ -754,7 +957,7 @@ impl Repo {
             .expect("validated path has a file name")
             .to_string_lossy();
         let tmp = parent.join(format!(".{name}{}", worktree::TMP_SUFFIX));
-        let blob = self.blob(entry.blob)?;
+        let blob = self.content(path, entry)?;
         let written = (|| -> Result<()> {
             let mut out = BufWriter::new(File::create(&tmp)?);
             self.store.write_blob(&blob, &mut out)?;
@@ -840,6 +1043,7 @@ impl Repo {
         choose: impl FnMut(&Conflict) -> Option<Resolution>,
     ) -> Result<MergeOutcome> {
         let branch = self.current_branch()?;
+        let _lock = self.lock_shared()?;
         match self.plan_merge(rev)? {
             MergePlan::UpToDate => Ok(MergeOutcome::UpToDate),
             MergePlan::FastForward { ours_tree, theirs } => {

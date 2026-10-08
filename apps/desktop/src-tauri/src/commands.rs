@@ -4,10 +4,11 @@
 //! on a blocking thread, since status and saving may hash gigabytes of audio.
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use takes_core::{Hash, Repo};
 use tauri::{AppHandle, Manager, State};
@@ -177,12 +178,19 @@ pub async fn snapshot_changes(root: String, id: String) -> CmdResult<Vec<ChangeD
         let repo = open(&root)?;
         let id = repo.resolve(&id)?;
         let tree = repo.tree(id)?;
+        let pruned = repo.pruned()?;
+        let meta = repo.all_file_meta()?;
         Ok(repo
             .changes_in(id)?
             .iter()
-            .map(|c| ChangeDto {
-                size: tree.get(&c.path).map(|e| e.size),
-                ..c.into()
+            .map(|c| {
+                let entry = tree.get(&c.path);
+                ChangeDto {
+                    size: entry.map(|e| e.size),
+                    pruned: entry.is_some_and(|e| pruned.contains(&e.blob)),
+                    labels: labels(&meta, entry.map(|e| e.blob)),
+                    ..c.into()
+                }
             })
             .collect())
     })
@@ -194,9 +202,14 @@ pub async fn files(root: String, rev: String) -> CmdResult<Vec<FileDto>> {
     blocking(move || {
         let repo = open(&root)?;
         let tree = repo.tree(repo.resolve(&rev)?)?;
+        let meta = repo.all_file_meta()?;
         Ok(tree
             .into_iter()
-            .map(|(path, e)| FileDto { path, size: e.size })
+            .map(|(path, e)| FileDto {
+                path,
+                size: e.size,
+                labels: labels(&meta, Some(e.blob)),
+            })
             .collect())
     })
     .await
@@ -205,10 +218,13 @@ pub async fn files(root: String, rev: String) -> CmdResult<Vec<FileDto>> {
 #[tauri::command]
 pub async fn file_history(root: String, path: String) -> CmdResult<Vec<FileVersionDto>> {
     blocking(move || {
-        Ok(open(&root)?
+        let repo = open(&root)?;
+        let pruned = repo.pruned()?;
+        let meta = repo.all_file_meta()?;
+        Ok(repo
             .file_history(&path, None)?
             .iter()
-            .map(Into::into)
+            .map(|v| FileVersionDto::new(v, &pruned, &meta))
             .collect())
     })
     .await
@@ -217,6 +233,32 @@ pub async fn file_history(root: String, path: String) -> CmdResult<Vec<FileVersi
 #[tauri::command]
 pub async fn stats(root: String) -> CmdResult<StatsDto> {
     blocking(move || Ok(open(&root)?.stats()?.into())).await
+}
+
+/// Frees space; `older_than_days` also removes the files of old
+/// intermediate versions. With `dry_run`, only says how much would go.
+#[tauri::command]
+pub async fn cleanup(
+    root: String,
+    older_than_days: Option<u32>,
+    dry_run: bool,
+) -> CmdResult<CleanupDto> {
+    blocking(move || {
+        let before = older_than_days.map(|days| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            now - i64::from(days) * 24 * 60 * 60
+        });
+        Ok(open(&root)?.cleanup(before, dry_run)?.into())
+    })
+    .await
+}
+
+/// Packs a version into a ZIP (e.g. a release for a label).
+#[tauri::command]
+pub async fn export_zip(root: String, rev: String, dest: String) -> CmdResult<u64> {
+    blocking(move || Ok(open(&root)?.export_zip(&rev, Path::new(&dest))?)).await
 }
 
 #[tauri::command]
@@ -301,6 +343,12 @@ pub async fn restore(
     blocking(move || Ok(open(&root)?.restore(&path, &rev, dest.as_deref(), force)?)).await
 }
 
+/// Extracted versions kept for playback, at most this much; the least
+/// recently used go first.
+const PREVIEW_CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+/// Never evict what was used this recently: the player may be streaming it.
+const PREVIEW_IN_USE: Duration = Duration::from_secs(15 * 60);
+
 /// Copies a stored file version into the app cache (named by content hash,
 /// so each version is extracted once) and returns that copy and the hash.
 fn extract_version(repo: &Repo, cache: &Path, rev: &str, path: &str) -> CmdResult<(PathBuf, Hash)> {
@@ -311,7 +359,13 @@ fn extract_version(repo: &Repo, cache: &Path, rev: &str, path: &str) -> CmdResul
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
     let target = cache.join(format!("{}{ext}", entry.blob.to_hex()));
-    if !target.exists() {
+    if target.exists() {
+        // Mark it used, for eviction.
+        let _ = File::options()
+            .write(true)
+            .open(&target)
+            .and_then(|f| f.set_modified(SystemTime::now()));
+    } else {
         fs::create_dir_all(cache)?;
         // Unique temp name: playback and analysis may extract the same
         // version at the same time.
@@ -323,8 +377,34 @@ fn extract_version(repo: &Repo, cache: &Path, rev: &str, path: &str) -> CmdResul
         ));
         repo.export(rev, path, &tmp)?;
         fs::rename(&tmp, &target)?;
+        trim_cache(cache, PREVIEW_CACHE_LIMIT);
     }
     Ok((target, entry.blob))
+}
+
+/// Deletes the least recently used files until `dir` is under `limit`.
+fn trim_cache(dir: &Path, limit: u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let meta = e.metadata().ok().filter(|m| m.is_file())?;
+            Some((meta.modified().ok()?, meta.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort();
+    let recent = SystemTime::now() - PREVIEW_IN_USE;
+    for (used, len, path) in files {
+        if total <= limit || used > recent {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total -= len;
+        }
+    }
 }
 
 /// The local file holding a version (`rev: None` = the file on disk now).
@@ -380,15 +460,20 @@ pub async fn analyze_audio(
         let repo = open(&root)?;
         let (file, hash) = local_file(&repo, &cache.join("previews"), rev.as_deref(), &path)?;
         let dir = cache.join("analysis");
-        let cached = dir.join(format!("v1-{}.json", hash.to_hex()));
+        let manual = repo.file_meta(hash)?;
+        let dto = |analysis| AnalysisDto {
+            blob: hash.to_hex(),
+            analysis,
+            manual_bpm: manual.bpm,
+            manual_key: manual.key.clone(),
+        };
+        // v2: with tempo and key.
+        let cached = dir.join(format!("v2-{}.json", hash.to_hex()));
         if let Ok(analysis) = fs::read(&cached)
             .map_err(CommandError::from)
             .and_then(|b| serde_json::from_slice(&b).map_err(CommandError::other))
         {
-            return Ok(AnalysisDto {
-                blob: hash.to_hex(),
-                analysis,
-            });
+            return Ok(dto(analysis));
         }
         let analysis = takes_audio::analyze(&file).map_err(|e| CommandError {
             kind: "notAudio",
@@ -401,10 +486,113 @@ pub async fn analyze_audio(
             serde_json::to_vec(&analysis).map_err(CommandError::other)?,
         )?;
         fs::rename(&tmp, &cached)?;
-        Ok(AnalysisDto {
-            blob: hash.to_hex(),
-            analysis,
-        })
+        Ok(dto(analysis))
+    })
+    .await
+}
+
+// ---- labels, text and PDF ---------------------------------------------------
+
+/// Labels, tempo and key of `path` in `rev` (`None`: the file on disk).
+#[tauri::command]
+pub async fn file_meta(root: String, rev: Option<String>, path: String) -> CmdResult<FileMetaDto> {
+    blocking(move || {
+        let repo = open(&root)?;
+        let blob = match rev {
+            Some(rev) => repo.file_at(&rev, &path)?.blob,
+            None => takes_core::hash_file(&repo.abs(&path)?)?.0,
+        };
+        Ok(repo.file_meta(blob)?.into())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_file_meta(
+    root: String,
+    rev: String,
+    path: String,
+    meta: FileMetaDto,
+) -> CmdResult<()> {
+    blocking(move || Ok(open(&root)?.set_file_meta(&rev, &path, &meta.into())?)).await
+}
+
+/// Collects at most `limit` bytes of what is written to it.
+struct Head {
+    data: Vec<u8>,
+    limit: usize,
+    cut: bool,
+}
+
+impl std::io::Write for Head {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = self.limit - self.data.len();
+        self.cut |= buf.len() > room;
+        self.data.extend_from_slice(&buf[..buf.len().min(room)]);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The beginning of a file version (`rev: None`: the file on disk).
+fn read_head(
+    repo: &Repo,
+    rev: Option<&str>,
+    path: &str,
+    limit: usize,
+) -> CmdResult<(Vec<u8>, bool)> {
+    let mut head = Head {
+        data: Vec::new(),
+        limit,
+        cut: false,
+    };
+    match rev {
+        Some(rev) => repo.read_file(rev, path, &mut head)?,
+        None => {
+            std::io::copy(&mut File::open(repo.abs(path)?)?, &mut head)?;
+        }
+    }
+    Ok((head.data, head.cut))
+}
+
+/// A text file (lyrics, notes) for viewing and comparing, in whatever
+/// encoding it was saved.
+#[tauri::command]
+pub async fn text_file(root: String, rev: Option<String>, path: String) -> CmdResult<TextDto> {
+    const LIMIT: usize = 2 * 1024 * 1024;
+    blocking(move || {
+        let repo = open(&root)?;
+        let (data, truncated) = read_head(&repo, rev.as_deref(), &path, LIMIT)?;
+        let text = takes_core::decode_text(&data).ok_or_else(|| CommandError {
+            kind: "notText",
+            ..CommandError::other("not a text file")
+        })?;
+        Ok(TextDto { text, truncated })
+    })
+    .await
+}
+
+/// The bytes of a document (PDF) for the viewer, sent as binary.
+#[tauri::command]
+pub async fn file_bytes(
+    root: String,
+    rev: Option<String>,
+    path: String,
+) -> CmdResult<tauri::ipc::Response> {
+    const LIMIT: usize = 200 * 1024 * 1024;
+    blocking(move || {
+        let repo = open(&root)?;
+        let (data, cut) = read_head(&repo, rev.as_deref(), &path, LIMIT)?;
+        if cut {
+            return Err(CommandError {
+                kind: "tooLarge",
+                ..CommandError::other("file too large to show")
+            });
+        }
+        Ok(tauri::ipc::Response::new(data))
     })
     .await
 }

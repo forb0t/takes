@@ -1,7 +1,8 @@
 use std::fs;
 
 use takes_core::{
-    Change, ChangeKind, Error, MergeKind, MergeOutcome, Repo, Resolution, Stats, hash_file,
+    Change, ChangeKind, Error, FileMeta, MergeKind, MergeOutcome, Repo, Resolution, Stats,
+    hash_file,
 };
 use tempfile::TempDir;
 
@@ -555,4 +556,185 @@ fn comments_follow_file_content_across_versions() {
         1
     );
     assert_eq!(hash_file(&repo.root().join("mix.wav")).unwrap().0, mix2);
+}
+
+#[test]
+fn edits_that_keep_the_size_are_noticed() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "mix.wav", noise(10_000, 1));
+    write(&repo, "same.wav", "unchanged");
+    repo.commit("one", &[]).unwrap();
+
+    // A re-bounce of the same length: only the content tells.
+    write(&repo, "mix.wav", noise(10_000, 2));
+    // Touched but identical.
+    write(&repo, "same.wav", "unchanged");
+    assert_eq!(changes(&repo), [ch("mix.wav", ChangeKind::Modified)]);
+    repo.commit("two", &[]).unwrap();
+    assert!(changes(&repo).is_empty());
+    assert_eq!(read(&repo, "mix.wav"), noise(10_000, 2));
+}
+
+#[test]
+fn cleanup_drops_deleted_branches() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", noise(300_000, 1));
+    repo.commit("main", &[]).unwrap();
+    repo.create_branch("try", None).unwrap();
+    repo.switch("try").unwrap();
+    write(&repo, "idea.wav", noise(2_000_000, 2));
+    repo.commit("idea", &[]).unwrap();
+    repo.switch("main").unwrap();
+
+    let before = repo.stats().unwrap();
+    assert_eq!(repo.cleanup(None, false).unwrap().versions, 0);
+    repo.delete_branch("try").unwrap();
+    let plan = repo.cleanup(None, true).unwrap();
+    assert_eq!(plan.versions, 1);
+    assert!(plan.bytes >= 1_900_000, "{plan:?}");
+    assert_eq!(repo.stats().unwrap(), before, "a dry run changes nothing");
+
+    assert_eq!(repo.cleanup(None, false).unwrap(), plan);
+    let after = repo.stats().unwrap();
+    assert_eq!(after.snapshots, 1);
+    assert!(after.stored_bytes < before.stored_bytes - 1_900_000);
+    assert_eq!(repo.cleanup(None, false).unwrap().bytes, 0);
+    // What stays is intact.
+    let mut out = Vec::new();
+    repo.read_file("HEAD", "song.wav", &mut out).unwrap();
+    assert_eq!(out, noise(300_000, 1));
+}
+
+#[test]
+fn pruning_keeps_history_but_frees_old_takes() {
+    let (_dir, mut repo) = setup();
+    for take in 1..=3 {
+        write(&repo, "vocal.wav", noise(500_000, take * 2 + 1));
+        write(&repo, "notes.txt", format!("take {take}"));
+        repo.commit(&format!("take {take}"), &[]).unwrap();
+    }
+    repo.create_tag("demo", "HEAD~2").unwrap();
+    let log = repo.log(None).unwrap();
+
+    let freed = repo.cleanup(Some(i64::MAX), false).unwrap();
+    assert_eq!(freed.versions, 0);
+    // Take 2 alone is neither the latest nor tagged.
+    assert_eq!(freed.contents, 2);
+    assert!(freed.bytes >= 450_000, "{freed:?}");
+    assert_eq!(repo.log(None).unwrap(), log, "history stays");
+
+    let mut out = Vec::new();
+    repo.read_file("demo", "vocal.wav", &mut out).unwrap();
+    assert_eq!(out, noise(500_000, 3));
+    assert!(matches!(
+        repo.read_file("HEAD~1", "vocal.wav", &mut Vec::new()),
+        Err(Error::ContentPruned(p)) if p == "vocal.wav"
+    ));
+    assert!(matches!(
+        repo.restore("vocal.wav", "HEAD~1", Some("old.wav"), false),
+        Err(Error::ContentPruned(_))
+    ));
+    // A branch from a pruned version cannot be checked out; nothing changes.
+    repo.create_branch("back", Some("HEAD~1")).unwrap();
+    assert!(matches!(repo.switch("back"), Err(Error::ContentPruned(_))));
+    assert_eq!(repo.current_branch().unwrap(), "main");
+    assert_eq!(read(&repo, "vocal.wav"), noise(500_000, 7));
+    assert!(changes(&repo).is_empty());
+}
+
+#[test]
+fn versions_export_as_zip() {
+    let (dir, mut repo) = setup();
+    write(&repo, "01 Intro.wav", noise(200_000, 1));
+    write(&repo, "Обложка/cover.png", "png");
+    repo.commit("master", &[]).unwrap();
+    repo.create_tag("master-v1", "HEAD").unwrap();
+    write(&repo, "01 Intro.wav", "changed later");
+    repo.commit("later", &[]).unwrap();
+
+    let dest = dir.path().join("Album master-v1.zip");
+    assert_eq!(repo.export_zip("master-v1", &dest).unwrap(), 2);
+    let mut zip = zip::ZipArchive::new(fs::File::open(&dest).unwrap()).unwrap();
+    let mut names: Vec<String> = zip.file_names().map(str::to_owned).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Album master-v1/01 Intro.wav",
+            "Album master-v1/Обложка/cover.png"
+        ]
+    );
+    let mut intro = Vec::new();
+    std::io::Read::read_to_end(
+        &mut zip.by_name("Album master-v1/01 Intro.wav").unwrap(),
+        &mut intro,
+    )
+    .unwrap();
+    assert_eq!(intro, noise(200_000, 1));
+}
+
+#[test]
+fn labels_follow_the_content() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "mix.wav", noise(10_000, 1));
+    write(&repo, "notes.txt", "a");
+    repo.commit("mix", &[]).unwrap();
+    let meta = FileMeta {
+        labels: vec!["мастер".into(), "демо".into()],
+        bpm: Some(128.0),
+        key: Some("Am".into()),
+    };
+    repo.set_file_meta("HEAD", "mix.wav", &meta).unwrap();
+    let blob = repo.file_at("HEAD", "mix.wav").unwrap().blob;
+    let stored = repo.file_meta(blob).unwrap();
+    assert_eq!(stored.labels, ["демо", "мастер"]);
+    assert_eq!(
+        (stored.bpm, stored.key.as_deref()),
+        (Some(128.0), Some("Am"))
+    );
+
+    // A later version with the same mix keeps the notes; a new mix has none.
+    write(&repo, "notes.txt", "b");
+    repo.commit("notes", &[]).unwrap();
+    assert_eq!(
+        repo.file_meta(repo.file_at("HEAD", "mix.wav").unwrap().blob)
+            .unwrap(),
+        stored
+    );
+    write(&repo, "mix.wav", noise(10_000, 3));
+    repo.commit("new mix", &[]).unwrap();
+    let new_blob = repo.file_at("HEAD", "mix.wav").unwrap().blob;
+    assert!(repo.file_meta(new_blob).unwrap().is_empty());
+
+    // Changing notes replaces them; the latest change wins.
+    let fewer = FileMeta {
+        labels: vec!["мастер".into()],
+        bpm: None,
+        key: Some("A minor".into()),
+    };
+    repo.set_file_meta("HEAD~1", "mix.wav", &fewer).unwrap();
+    assert_eq!(repo.file_meta(blob).unwrap(), fewer);
+    let all = repo.all_file_meta().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[&blob], fewer);
+
+    for bad in [
+        FileMeta {
+            labels: vec![" пробел".into()],
+            ..Default::default()
+        },
+        FileMeta {
+            labels: vec!["x".repeat(41)],
+            ..Default::default()
+        },
+        FileMeta {
+            bpm: Some(5.0),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            repo.set_file_meta("HEAD", "mix.wav", &bad),
+            Err(Error::InvalidMeta(_))
+        ));
+    }
 }

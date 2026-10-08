@@ -5,6 +5,7 @@ import { Icon, PromptDialog, useToast } from "../ui";
 import { formatSize, prettyPath } from "../util";
 import { BranchMenu } from "./BranchMenu";
 import { ChangesTab } from "./ChangesTab";
+import { CleanupDialog } from "./CleanupDialog";
 import { FilesTab } from "./FilesTab";
 import { HistoryTab } from "./HistoryTab";
 import { MergeDialog } from "./MergeDialog";
@@ -23,6 +24,8 @@ export function ProjectView({ root }: { root: string }) {
   const [editAuthor, setEditAuthor] = useState(false);
   const [syncState, setSyncState] = useState<SyncState | null>(null);
   const [mergeFrom, setMergeFrom] = useState<DivergedBranch | null>(null);
+  const [cleanup, setCleanup] = useState(false);
+  const [updating, setUpdating] = useState(false);
 
   // Status can take a while on big files; never run two at once, but
   // remember that another run was requested meanwhile.
@@ -51,10 +54,11 @@ export function ProjectView({ root }: { root: string }) {
   }, [root]);
 
   const refreshAll = useCallback(async () => {
+    // Disk usage walks the whole store: never let it hold up the rest.
+    api.stats(root).then(setStats, () => {});
     try {
-      const [o, s, sync] = await Promise.all([api.overview(root), api.stats(root), api.syncState(root)]);
+      const [o, sync] = await Promise.all([api.overview(root), api.syncState(root)]);
       setOverview(o);
-      setStats(s);
       setSyncState(sync);
       setLoadError(null);
     } catch (e) {
@@ -62,6 +66,25 @@ export function ProjectView({ root }: { root: string }) {
     }
     await refreshStatus();
   }, [root, refreshStatus]);
+
+  async function updateFiles() {
+    setUpdating(true);
+    try {
+      const report = await api.updateCurrent(root);
+      if (report.currentBlocked === "unsaved") {
+        toast("Сначала сохраните или отмените изменения.", "error");
+      } else if (report.currentBlocked) {
+        toast(`Не получилось обновить: мешают файлы ${report.blockedPaths.join(", ")}.`, "error");
+      } else {
+        toast("Файлы обновлены до новой версии", "ok");
+      }
+    } catch (e) {
+      toast(errorText(e), "error");
+    } finally {
+      setUpdating(false);
+      refreshAll();
+    }
+  }
 
   useEffect(() => {
     refreshAll();
@@ -104,9 +127,9 @@ export function ProjectView({ root }: { root: string }) {
         </div>
         <div className="project-tools">
           {stats && stats.snapshots > 0 && (
-            <span className="muted nowrap" title="Сколько места занимает история">
+            <button className="chip muted nowrap" title="Сколько места занимает история · освободить" onClick={() => setCleanup(true)}>
               {stats.snapshots} верс. · {formatSize(stats.storedBytes)}
-            </span>
+            </button>
           )}
           <button className="chip" title="Автор новых версий" onClick={() => setEditAuthor(true)}>
             {overview.author} <Icon name="edit" size={12} />
@@ -128,15 +151,24 @@ export function ProjectView({ root }: { root: string }) {
           </button>
         </div>
       ))}
-      {syncState?.waiting.includes(overview.branch) && (
-        <div className="banner">
-          <Icon name="download" size={15} />
-          <span>
-            С другого устройства пришла новая версия «{overview.branch}», но здесь есть несохранённые изменения.
-            Сохраните или отмените их и синхронизируйте снова.
-          </span>
-        </div>
-      )}
+      {syncState?.waiting.includes(overview.branch) &&
+        (count > 0 ? (
+          <div className="banner">
+            <Icon name="download" size={15} />
+            <span>
+              С другого устройства пришла новая версия «{overview.branch}», но здесь есть несохранённые изменения.
+              Сохраните или отмените их, чтобы получить её.
+            </span>
+          </div>
+        ) : (
+          <div className="banner">
+            <Icon name="download" size={15} />
+            <span>С другого устройства пришла новая версия «{overview.branch}».</span>
+            <button className="btn btn-small" disabled={updating} onClick={updateFiles}>
+              {updating ? "Обновляю…" : "Обновить файлы"}
+            </button>
+          </div>
+        ))}
 
       <nav className="tabs">
         <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
@@ -166,6 +198,9 @@ export function ProjectView({ root }: { root: string }) {
           onClose={() => setMergeFrom(null)}
           onMerged={refreshAll}
         />
+      )}
+      {cleanup && (
+        <CleanupDialog root={root} stats={stats} onClose={() => setCleanup(false)} onDone={refreshAll} />
       )}
       {editAuthor && (
         <PromptDialog

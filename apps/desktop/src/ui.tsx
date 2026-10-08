@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { errorText, type ChangeKind } from "./api";
-import { splitPath } from "./util";
+import { LABEL_PRESETS, splitPath } from "./util";
 
 // ---- icons ------------------------------------------------------------------
 
@@ -34,6 +34,11 @@ const paths = {
   sync: "M20 11a8 8 0 0 0-14.7-3.5M4 4v4h4M4 13a8 8 0 0 0 14.7 3.5M20 20v-4h-4",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
   download: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  image: "M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15.5 9.5h.01",
+  doc: "M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6",
+  label: "M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9zM8 8h.01",
+  archive: "M3 5h18v4H3zM5 9v10h14V9M10 13h4",
+  broom: "M14 4l-4 8M6 13h8l2 7H4zM8 16v4M12 16v4",
 } as const;
 
 export type IconName = keyof typeof paths;
@@ -64,6 +69,32 @@ const KIND = {
   modified: { sign: "~", title: "Изменён" },
   deleted: { sign: "−", title: "Удалён" },
 } as const;
+
+/** Presets first, in their order of work, then the rest by name. */
+export function sortLabels(labels: string[]): string[] {
+  const rank = (l: string) => {
+    const i = LABEL_PRESETS.indexOf(l);
+    return i < 0 ? LABEL_PRESETS.length : i;
+  };
+  return [...labels].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
+/** A file content's labels ("демо", "мастер", …) as small chips. */
+export function FileLabels({ labels }: { labels: string[] }) {
+  if (labels.length === 0) return null;
+  return (
+    <span className="file-labels">
+      {sortLabels(labels).map((l) => {
+        const preset = LABEL_PRESETS.indexOf(l);
+        return (
+          <span key={l} className={`file-label ${preset >= 0 ? `file-label-${preset}` : ""}`}>
+            {l}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 export function KindBadge({ kind }: { kind: ChangeKind }) {
   return (
@@ -103,12 +134,15 @@ export function Modal({
   children,
   footer,
   wide,
+  className,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  /** Extra class for the dialog, e.g. a size. */
+  className?: string;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -117,7 +151,7 @@ export function Modal({
   }, [onClose]);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${wide ? "modal-wide" : ""}`} role="dialog" aria-label={title}>
+      <div className={`modal ${wide ? "modal-wide" : ""} ${className ?? ""}`} role="dialog" aria-label={title}>
         <div className="modal-head">
           <h2>{title}</h2>
           <button className="icon-btn" onClick={onClose} aria-label="Закрыть">
