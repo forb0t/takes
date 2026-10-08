@@ -325,6 +325,13 @@ impl From<Error> for CommandError {
             Error::CannotDeleteCurrentBranch(_) => "cannotDeleteCurrentBranch",
             Error::PathNotFound { .. } => "pathNotFound",
             Error::Corrupt(_) => "corrupt",
+            Error::Remote(_) => "remote",
+            Error::RemoteAuth => "remoteAuth",
+            Error::RemoteMismatch => "remoteMismatch",
+            Error::RemoteNotConfigured => "remoteNotConfigured",
+            Error::RemoteNotEmpty => "remoteNotEmpty",
+            Error::NotARemote => "notARemote",
+            Error::FolderNotEmpty(_) => "folderNotEmpty",
             Error::DirtyWorktree(changes) => {
                 out.changes = changes.iter().map(Into::into).collect();
                 "dirtyWorktree"

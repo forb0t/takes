@@ -109,6 +109,49 @@ export interface Comment {
   resolved: boolean;
 }
 
+export type RemoteConfig =
+  | { kind: "folder"; path: string }
+  | { kind: "webDav"; url: string; folder: string; username: string };
+
+export interface DivergedBranch {
+  branch: string;
+  device: string;
+  /** What to merge, e.g. "main@Студия". */
+  rev: string;
+}
+
+export interface SyncState {
+  remote: RemoteConfig | null;
+  location: string | null;
+  hasPassword: boolean;
+  deviceName: string;
+  unsentVersions: number;
+  diverged: DivergedBranch[];
+  waiting: string[];
+  lastSync: number | null;
+}
+
+export interface SyncReport {
+  uploadedBytes: number;
+  downloadedBytes: number;
+  sentVersions: number;
+  receivedVersions: number;
+  commentsSent: number;
+  commentsReceived: number;
+  updatedBranches: string[];
+  newBranches: string[];
+  diverged: DivergedBranch[];
+  currentBlocked: "unsaved" | "filesBusy" | "wouldOverwrite" | null;
+  blockedPaths: string[];
+}
+
+export interface SyncProgress {
+  root: string;
+  phase: "connecting" | "downloading" | "uploading";
+  done: number;
+  total: number;
+}
+
 /** Error shape produced by the Rust commands. */
 export interface CommandError {
   kind: string;
@@ -158,6 +201,19 @@ export const api = {
   addComment: (root: string, rev: string | null, path: string, timecodeMs: number | null, text: string) =>
     invoke<number>("add_comment", { root, rev, path, timecodeMs, text }),
   resolveComment: (root: string, id: number) => invoke<void>("resolve_comment", { root, id }),
+
+  syncState: (root: string) => invoke<SyncState>("sync_state", { root }),
+  setRemote: (root: string, remote: RemoteConfig, password: string | null) =>
+    invoke<void>("set_remote", { root, remote, password }),
+  removeRemote: (root: string) => invoke<void>("remove_remote", { root }),
+  setDeviceName: (root: string, name: string) => invoke<void>("set_device_name", { root, name }),
+  sync: (root: string, password: string | null) => invoke<SyncReport>("sync", { root, password }),
+  findRemoteProjects: (remote: RemoteConfig, password: string | null) =>
+    invoke<string[]>("find_remote_projects", { remote, password }),
+  isRemoteProject: (remote: RemoteConfig, password: string | null) =>
+    invoke<boolean>("is_remote_project", { remote, password }),
+  cloneProject: (remote: RemoteConfig, password: string | null, dest: string) =>
+    invoke<Project>("clone_project", { remote, password, dest }),
 };
 
 export function isCommandError(e: unknown): e is CommandError {
@@ -178,6 +234,15 @@ const MESSAGES: Record<string, string> = {
   pathNotFound: "Файла нет в этой версии.",
   corrupt: "Данные проекта повреждены.",
   notAudio: "Не удалось прочитать звук: формат не поддерживается или файл повреждён.",
+  remoteAuth: "Хранилище не приняло логин или пароль.",
+  remoteMismatch: "В этом хранилище лежит другой проект. Выберите другую папку.",
+  remoteNotEmpty: "Папка не пустая и не похожа на хранилище Takes. Выберите пустую или новую папку.",
+  remoteNotConfigured: "Хранилище не подключено.",
+  notARemote: "Здесь нет проекта Takes.",
+  folderNotEmpty: "Папка для проекта должна быть пустой или новой.",
+  passwordNeeded: "Нужен пароль от хранилища.",
+  keychain: "Не удалось сохранить пароль в системной связке ключей.",
+  alreadySyncing: "Синхронизация уже идёт.",
   unsavedFile: "Файл изменён и не сохранён. Сохраните версию, чтобы оставлять к нему комментарии.",
 };
 
@@ -186,6 +251,7 @@ export function errorText(e: unknown): string {
     const names = e.paths.map((p) => `«${p.split("/").pop()}»`).join(", ");
     return `Файлы открыты в другой программе (например, в DAW) или защищены от записи: ${names}. Закройте их и повторите. Ничего не изменено.`;
   }
+  if (isCommandError(e) && e.kind === "remote") return `Хранилище недоступно: ${e.message}`;
   if (isCommandError(e)) return MESSAGES[e.kind] ?? e.message;
   return String(e);
 }

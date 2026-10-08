@@ -1,6 +1,7 @@
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText, type Project } from "./api";
+import { CloneDialog } from "./components/CloneDialog";
 import { ProjectView } from "./components/ProjectView";
 import { PlayerBar } from "./player";
 import { Empty, Icon, useToast } from "./ui";
@@ -20,6 +21,8 @@ export default function App() {
   const toast = useToast();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [selected, setSelected] = useState<string | null>(readSelected);
+  const [addMenu, setAddMenu] = useState(false);
+  const [cloning, setCloning] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -86,9 +89,33 @@ export default function App() {
         </div>
         <div className="sidebar-head">
           <span>Проекты</span>
-          <button className="icon-btn" title="Добавить проект" onClick={addProject}>
-            <Icon name="plus" />
-          </button>
+          <div className="add-menu">
+            <button className="icon-btn" title="Добавить проект" onClick={() => setAddMenu((o) => !o)}>
+              <Icon name="plus" />
+            </button>
+            {addMenu && (
+              <div className="popover popover-left" onMouseLeave={() => setAddMenu(false)}>
+                <button
+                  className="popover-action"
+                  onClick={() => {
+                    setAddMenu(false);
+                    addProject();
+                  }}
+                >
+                  <Icon name="folder" size={14} /> Папка на этом компьютере…
+                </button>
+                <button
+                  className="popover-action"
+                  onClick={() => {
+                    setAddMenu(false);
+                    setCloning(true);
+                  }}
+                >
+                  <Icon name="download" size={14} /> Получить из хранилища…
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <div className="project-list scroll">
           {projects?.map((p) => (
@@ -122,9 +149,14 @@ export default function App() {
               <Empty icon="wave" title="Создайте первый проект">
                 Выберите папку с файлами, например с песнями альбома. Takes будет хранить версии прямо в ней: можно
                 сохранять демки, вести ветки и возвращаться к любой версии.
-                <button className="btn btn-primary" onClick={addProject}>
-                  <Icon name="folder" /> Выбрать папку
-                </button>
+                <div className="empty-actions">
+                  <button className="btn btn-primary" onClick={addProject}>
+                    <Icon name="folder" /> Выбрать папку
+                  </button>
+                  <button className="btn" onClick={() => setCloning(true)}>
+                    <Icon name="download" /> Получить из хранилища
+                  </button>
+                </div>
               </Empty>
             </div>
           )
@@ -132,6 +164,17 @@ export default function App() {
       </main>
 
       <PlayerBar />
+      {cloning && (
+        <CloneDialog
+          onClose={() => setCloning(false)}
+          onCloned={async (project) => {
+            setCloning(false);
+            await reload();
+            setSelected(project.path);
+            toast(`Проект «${project.name}» получен`, "ok");
+          }}
+        />
+      )}
     </div>
   );
 }

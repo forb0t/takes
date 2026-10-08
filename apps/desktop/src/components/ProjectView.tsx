@@ -1,12 +1,14 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorText, type Change, type Overview, type Stats } from "../api";
+import { api, errorText, type Change, type DivergedBranch, type Overview, type Stats, type SyncState } from "../api";
 import { Icon, PromptDialog, useToast } from "../ui";
 import { formatSize, prettyPath } from "../util";
 import { BranchMenu } from "./BranchMenu";
 import { ChangesTab } from "./ChangesTab";
 import { FilesTab } from "./FilesTab";
 import { HistoryTab } from "./HistoryTab";
+import { MergeDialog } from "./MergeDialog";
+import { SyncControl } from "./SyncControl";
 
 type Tab = "changes" | "history" | "files";
 
@@ -19,6 +21,8 @@ export function ProjectView({ root }: { root: string }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("changes");
   const [editAuthor, setEditAuthor] = useState(false);
+  const [syncState, setSyncState] = useState<SyncState | null>(null);
+  const [mergeFrom, setMergeFrom] = useState<DivergedBranch | null>(null);
 
   // Status can take a while on big files; never run two at once, but
   // remember that another run was requested meanwhile.
@@ -48,9 +52,10 @@ export function ProjectView({ root }: { root: string }) {
 
   const refreshAll = useCallback(async () => {
     try {
-      const [o, s] = await Promise.all([api.overview(root), api.stats(root)]);
+      const [o, s, sync] = await Promise.all([api.overview(root), api.stats(root), api.syncState(root)]);
       setOverview(o);
       setStats(s);
+      setSyncState(sync);
       setLoadError(null);
     } catch (e) {
       setLoadError(errorText(e));
@@ -107,8 +112,31 @@ export function ProjectView({ root }: { root: string }) {
             {overview.author} <Icon name="edit" size={12} />
           </button>
           <BranchMenu overview={overview} onChanged={refreshAll} />
+          <SyncControl root={root} projectName={overview.name} state={syncState} onSynced={refreshAll} />
         </div>
       </header>
+
+      {syncState?.diverged.map((d) => (
+        <div key={d.rev} className="banner">
+          <Icon name="merge" size={15} />
+          <span>
+            Ветка «{d.branch}» изменилась и здесь, и на устройстве «{d.device}». Слейте версии, чтобы продолжить
+            вместе.
+          </span>
+          <button className="btn btn-small" onClick={() => setMergeFrom(d)}>
+            Слить…
+          </button>
+        </div>
+      ))}
+      {syncState?.waiting.includes(overview.branch) && (
+        <div className="banner">
+          <Icon name="download" size={15} />
+          <span>
+            С другого устройства пришла новая версия «{overview.branch}», но здесь есть несохранённые изменения.
+            Сохраните или отмените их и синхронизируйте снова.
+          </span>
+        </div>
+      )}
 
       <nav className="tabs">
         <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
@@ -130,6 +158,15 @@ export function ProjectView({ root }: { root: string }) {
         {tab === "files" && <FilesTab overview={overview} onChanged={refreshAll} />}
       </div>
 
+      {mergeFrom && (
+        <MergeDialog
+          overview={overview}
+          remoteSources={syncState?.diverged ?? []}
+          initialSource={mergeFrom.rev}
+          onClose={() => setMergeFrom(null)}
+          onMerged={refreshAll}
+        />
+      )}
       {editAuthor && (
         <PromptDialog
           title="Автор версий"

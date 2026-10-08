@@ -17,6 +17,7 @@ mod error;
 mod hash;
 mod merge;
 mod model;
+mod remote;
 mod repo;
 mod store;
 mod worktree;
@@ -27,6 +28,10 @@ pub use merge::{Conflict, MergeKind, MergeOutcome, MergePreview, Resolution};
 pub use model::{
     Branch, Change, ChangeKind, Comment, Entry, FileVersion, Snapshot, Stats, Tag, Tree,
 };
-pub use repo::{DEFAULT_BRANCH, Repo, validate_name};
+pub use remote::{FolderStorage, RemoteConfig, Storage, WebDavStorage};
+pub use repo::{
+    Blocked, DEFAULT_BRANCH, Diverged, Repo, SyncPhase, SyncProgress, SyncReport, SyncState,
+    find_remote_projects, is_remote_project, validate_name,
+};
 pub use store::hash_file;
 pub use worktree::{IGNORE_FILE, META_DIR};

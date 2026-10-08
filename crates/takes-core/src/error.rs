@@ -42,6 +42,20 @@ pub enum Error {
     PathNotFound { path: String, rev: String },
     #[error("no comment with id {0}")]
     NoSuchComment(i64),
+    #[error("folder {0} is not empty")]
+    FolderNotEmpty(PathBuf),
+    #[error("cannot reach the remote: {0}")]
+    Remote(String),
+    #[error("the remote rejected the login or password")]
+    RemoteAuth,
+    #[error("this remote belongs to another project")]
+    RemoteMismatch,
+    #[error("no remote is set up for this project")]
+    RemoteNotConfigured,
+    #[error("the remote folder is not empty and does not hold a takes project")]
+    RemoteNotEmpty,
+    #[error("no takes project found at the remote")]
+    NotARemote,
     #[error("project data is damaged: {0}")]
     Corrupt(String),
     #[error(transparent)]

@@ -16,7 +16,7 @@ use crate::dto::*;
 
 pub type CmdResult<T> = Result<T, CommandError>;
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> CmdResult<T> + Send + 'static,
 ) -> CmdResult<T> {
     tauri::async_runtime::spawn_blocking(f)
@@ -89,17 +89,25 @@ pub fn add_project(
         Err(takes_core::Error::NotAProject(_)) if create => Repo::init(&path)?,
         other => other?,
     };
-    let root = repo.root().to_path_buf();
+    remember_project(&app, &list, repo.root())
+}
+
+/// Puts a project at the top of the list.
+pub(crate) fn remember_project(
+    app: &AppHandle,
+    list: &ProjectList,
+    root: &Path,
+) -> CmdResult<ProjectDto> {
     let project = ProjectDto {
         path: root.display().to_string(),
-        name: folder_name(&root),
+        name: folder_name(root),
         exists: true,
     };
     let _guard = list.0.lock().unwrap_or_else(|e| e.into_inner());
-    let mut projects = load_projects(&app)?;
+    let mut projects = load_projects(app)?;
     projects.retain(|p| p.path != project.path);
     projects.insert(0, project.clone());
-    save_projects(&app, &projects)?;
+    save_projects(app, &projects)?;
     Ok(project)
 }
 

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{Error, Result};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE config (
@@ -78,6 +78,37 @@ CREATE TABLE comments (
 CREATE INDEX comments_path ON comments (path);
 ";
 
+/// Version 2: sync. Comments get a global id; caches of what the remote holds.
+const MIGRATION_2: &str = "
+ALTER TABLE comments ADD COLUMN uid TEXT;
+ALTER TABLE comments ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE comments ADD COLUMN resolution_pushed INTEGER NOT NULL DEFAULT 0;
+UPDATE comments SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL;
+CREATE UNIQUE INDEX comments_uid ON comments (uid);
+
+-- Packs whose index we have read, and where each chunk lives in them.
+CREATE TABLE remote_packs (name TEXT PRIMARY KEY);
+CREATE TABLE remote_chunks (
+    hash   BLOB PRIMARY KEY,
+    pack   TEXT NOT NULL,
+    offset INTEGER NOT NULL,
+    length INTEGER NOT NULL
+);
+CREATE TABLE remote_snapshots (id BLOB PRIMARY KEY);
+
+-- Branch heads of every device, as last seen on the remote (ours included).
+CREATE TABLE remote_refs (
+    device      TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    snapshot_id BLOB NOT NULL,
+    PRIMARY KEY (device, name)
+);
+
+-- Comment and resolution files already imported from the remote.
+CREATE TABLE remote_seen (path TEXT PRIMARY KEY);
+";
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -97,6 +128,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 1 {
         conn.execute_batch(SCHEMA)?;
+    }
+    if version < 2 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_2} COMMIT;"))?;
     }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())

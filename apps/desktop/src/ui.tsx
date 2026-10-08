@@ -30,6 +30,10 @@ const paths = {
   wave: "M3 12h2M7 8v8M11 5v14M15 9v6M19 7v10M21 12h0",
   edit: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
   comment: "M4 5h16v11H9l-5 4z",
+  cloud: "M7 18a4.5 4.5 0 0 1-.5-9 6 6 0 0 1 11.6 1.6A3.8 3.8 0 0 1 17.5 18z",
+  sync: "M20 11a8 8 0 0 0-14.7-3.5M4 4v4h4M4 13a8 8 0 0 0 14.7 3.5M20 20v-4h-4",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
 } as const;
 
 export type IconName = keyof typeof paths;
@@ -135,6 +139,7 @@ export function PromptDialog({
   initial = "",
   confirm,
   hint,
+  password,
   onSubmit,
   onClose,
 }: {
@@ -144,6 +149,7 @@ export function PromptDialog({
   initial?: string;
   confirm: string;
   hint?: ReactNode;
+  password?: boolean;
   onSubmit: (value: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -181,6 +187,7 @@ export function PromptDialog({
         <span>{label}</span>
         <input
           autoFocus
+          type={password ? "password" : "text"}
           value={value}
           placeholder={placeholder}
           onChange={(e) => setValue(e.target.value)}

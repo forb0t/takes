@@ -16,6 +16,12 @@ use crate::model::{
 use crate::store::{self, Blob, ObjectStore};
 use crate::worktree::{self, META_DIR};
 
+mod sync;
+pub use sync::{
+    Blocked, Diverged, SyncPhase, SyncProgress, SyncReport, SyncState, find_remote_projects,
+    is_remote_project,
+};
+
 pub const DEFAULT_BRANCH: &str = "main";
 
 const BRANCH: &str = "branch";
@@ -276,6 +282,9 @@ impl Repo {
                 [_, _] => return Err(Error::AmbiguousRevision(base.into())),
                 _ => {}
             }
+        }
+        if let Some(id) = self.resolve_remote_head(base)? {
+            return Ok(id);
         }
         Err(Error::UnknownRevision(base.into()))
     }
@@ -877,8 +886,8 @@ impl Repo {
             });
         }
         self.conn.execute(
-            "INSERT INTO comments (snapshot_id, path, timecode_ms, text, author, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO comments (uid, snapshot_id, path, timecode_ms, text, author, created_at)
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 id,
                 path,

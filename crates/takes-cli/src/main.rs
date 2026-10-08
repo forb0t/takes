@@ -6,7 +6,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use takes_core::{
-    Change, ChangeKind, Conflict, Entry, Error, MergeKind, MergeOutcome, Repo, Resolution,
+    Blocked, Change, ChangeKind, Conflict, Entry, Error, MergeKind, MergeOutcome, RemoteConfig,
+    Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport,
 };
 
 #[derive(Parser)]
@@ -111,6 +112,40 @@ enum Command {
     Config { key: String, value: Option<String> },
     /// How much space the history takes
     Stats,
+    /// Show or set where the project syncs to
+    Remote {
+        #[command(subcommand)]
+        command: Option<RemoteCommand>,
+    },
+    /// Get new versions from other devices and send yours
+    Sync,
+    /// Get a project from a remote into a new folder
+    Clone {
+        /// Folder for the project (must be missing or empty)
+        into: PathBuf,
+        #[command(subcommand)]
+        from: RemoteCommand,
+    },
+    /// Show or set this computer's name, as other devices see it
+    Device { name: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum RemoteCommand {
+    /// A folder: on a NAS or USB drive, or inside Google Drive / Dropbox /
+    /// Yandex Disk synced by their app
+    Folder { path: PathBuf },
+    /// A WebDAV server, e.g. Yandex Disk: https://webdav.yandex.ru
+    /// (password from TAKES_PASSWORD or asked for)
+    Webdav {
+        url: String,
+        /// Project folder on the server, e.g. "Takes/My album"
+        folder: String,
+        #[arg(long)]
+        user: String,
+    },
+    /// Stop syncing (the remote itself is left untouched)
+    Remove,
 }
 
 #[derive(Subcommand)]
@@ -471,6 +506,81 @@ fn run(command: Command) -> Result<ExitCode> {
             }
         }
 
+        Command::Remote { command: None } => {
+            let repo = open()?;
+            let state = repo.sync_state()?;
+            match &state.remote {
+                None => println!(
+                    "No remote. Set one with `takes remote folder <path>` or `takes remote webdav ...`."
+                ),
+                Some(remote) => {
+                    println!("Remote:  {}", remote.describe());
+                    println!("Device:  {}", repo.device()?.1);
+                    match state.last_sync {
+                        Some(t) => println!("Synced:  {}", date(t)),
+                        None => println!("Synced:  never"),
+                    }
+                    println!("Unsent:  {} version(s)", state.unsent_versions);
+                    for d in &state.diverged {
+                        println!(
+                            "Diverged: {} — merge with `takes merge \"{}\"`",
+                            d.branch, d.rev
+                        );
+                    }
+                }
+            }
+        }
+        Command::Remote {
+            command: Some(RemoteCommand::Remove),
+        } => {
+            open()?.set_remote(None)?;
+            println!("Remote removed. Nothing was deleted from it.");
+        }
+        Command::Remote {
+            command: Some(command),
+        } => {
+            let repo = open()?;
+            let remote = remote_config(command)?;
+            let storage = connect(&remote)?;
+            repo.connect_remote(storage.as_ref())?;
+            repo.set_remote(Some(&remote))?;
+            println!(
+                "Remote set: {}. Run `takes sync` to send your versions.",
+                remote.describe()
+            );
+        }
+        Command::Sync => {
+            let mut repo = open()?;
+            let remote = repo
+                .sync_state()?
+                .remote
+                .ok_or(Error::RemoteNotConfigured)?;
+            let storage = connect(&remote)?;
+            let report = repo.sync(storage.as_ref(), &mut print_progress)?;
+            eprintln!();
+            print_report(&report);
+        }
+        Command::Clone { from, into } => {
+            let remote = remote_config(from)?;
+            let storage = connect(&remote)?;
+            let (repo, report) =
+                Repo::clone_from(storage.as_ref(), &remote, &into, &mut print_progress)?;
+            eprintln!();
+            println!(
+                "Got {} version(s) into {} (branch {}).",
+                report.received_versions,
+                repo.root().display(),
+                repo.current_branch()?
+            );
+        }
+        Command::Device { name } => {
+            let repo = open()?;
+            match name {
+                Some(name) => repo.set_device_name(&name)?,
+                None => println!("{}", repo.device()?.1),
+            }
+        }
+
         Command::Stats => {
             let s = open()?.stats()?;
             println!("Versions:           {}", s.snapshots);
@@ -491,6 +601,92 @@ fn run(command: Command) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn remote_config(command: RemoteCommand) -> Result<RemoteConfig> {
+    Ok(match command {
+        RemoteCommand::Folder { path } => {
+            let path = std::path::absolute(&path)?;
+            RemoteConfig::Folder {
+                path: path.display().to_string(),
+            }
+        }
+        RemoteCommand::Webdav { url, folder, user } => RemoteConfig::WebDav {
+            url,
+            folder,
+            username: user,
+        },
+        RemoteCommand::Remove => bail!("nothing to connect to"),
+    })
+}
+
+fn connect(remote: &RemoteConfig) -> Result<Box<dyn Storage>> {
+    let password = if remote.needs_password() {
+        Some(match std::env::var("TAKES_PASSWORD") {
+            Ok(p) => p,
+            Err(_) => rpassword::prompt_password(format!("Password for {}: ", remote.describe()))?,
+        })
+    } else {
+        None
+    };
+    Ok(remote.open(password.as_deref())?)
+}
+
+fn print_progress(p: SyncProgress) {
+    let what = match p.phase {
+        SyncPhase::Connecting => "Connecting",
+        SyncPhase::Downloading => "Downloading",
+        SyncPhase::Uploading => "Uploading",
+    };
+    if p.total > 0 {
+        eprint!(
+            "\r{what}: {} / {}      ",
+            human_size(p.done),
+            human_size(p.total)
+        );
+    } else {
+        eprint!("\r{what}…                ");
+    }
+}
+
+fn print_report(r: &SyncReport) {
+    println!(
+        "Received {} version(s), {} comment(s); sent {} version(s), {} comment(s) ({} down, {} up).",
+        r.received_versions,
+        r.comments_received,
+        r.sent_versions,
+        r.comments_sent,
+        human_size(r.downloaded_bytes),
+        human_size(r.uploaded_bytes)
+    );
+    for b in &r.updated_branches {
+        println!("Updated branch {b}");
+    }
+    for b in &r.new_branches {
+        println!("New branch {b}");
+    }
+    match &r.current_blocked {
+        Some(Blocked::Unsaved) => {
+            println!(
+                "The current branch has a newer version, but you have unsaved changes: save or discard them and sync again."
+            )
+        }
+        Some(Blocked::FilesBusy(p)) => println!(
+            "Close these files to get the newer version: {}",
+            p.join(", ")
+        ),
+        Some(Blocked::WouldOverwrite(p)) => println!(
+            "Move these files away to get the newer version: {}",
+            p.join(", ")
+        ),
+        None => {}
+    }
+    for d in &r.diverged {
+        println!(
+            "Branch {} also changed on {}: merge with `takes merge \"{}\"`",
+            d.branch, d.device, d.rev
+        );
+    }
 }
 
 /// Branch and tag names per version, for log decorations.

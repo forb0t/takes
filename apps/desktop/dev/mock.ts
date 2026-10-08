@@ -137,6 +137,21 @@ mockIPC(
           lufs: working ? -9.4 : -13.1,
         };
       }
+      case "sync_state":
+        return new URLSearchParams(location.search).has("nosync")
+          ? { remote: null, location: null, hasPassword: false, deviceName: "nikita-laptop", unsentVersions: 0, diverged: [], waiting: [], lastSync: null }
+          : {
+              remote: { kind: "webDav", url: "https://webdav.yandex.ru", folder: "Takes/Ночной альбом", username: "nikita" },
+              location: "https://webdav.yandex.ru/Takes/Ночной альбом",
+              hasPassword: true,
+              deviceName: "Ноутбук",
+              unsentVersions: 2,
+              diverged: [{ branch: "main", device: "Студия", rev: "main@Студия" }],
+              waiting: [],
+              lastSync: now - 3600,
+            };
+      case "find_remote_projects":
+        return ["Ночной альбом", "EP 2025"];
       case "comments":
         return a.rev === null ? [] : comments;
       case "add_comment":

@@ -2,6 +2,7 @@
 
 mod commands;
 mod dto;
+mod sync;
 mod watcher;
 
 fn main() {
@@ -10,6 +11,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(commands::ProjectList::default())
         .manage(watcher::WatchState::default())
+        .manage(sync::Syncing::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::is_project,
@@ -39,6 +41,14 @@ fn main() {
             commands::add_comment,
             commands::resolve_comment,
             watcher::watch_project,
+            sync::sync_state,
+            sync::set_remote,
+            sync::remove_remote,
+            sync::set_device_name,
+            sync::sync,
+            sync::find_remote_projects,
+            sync::is_remote_project,
+            sync::clone_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Takes");

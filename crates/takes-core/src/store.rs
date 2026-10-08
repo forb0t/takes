@@ -79,19 +79,40 @@ impl ObjectStore {
     }
 
     pub fn get_chunk(&self, hash: &Hash) -> Result<Vec<u8>> {
-        let raw = fs::read(self.chunk_path(hash)).map_err(|e| match e.kind() {
+        decode(hash, &self.read_raw(hash)?)
+    }
+
+    pub fn has_chunk(&self, hash: &Hash) -> bool {
+        self.chunk_path(hash).exists()
+    }
+
+    /// A chunk as stored (encoding tag + payload): what packs carry.
+    pub fn read_raw(&self, hash: &Hash) -> Result<Vec<u8>> {
+        fs::read(self.chunk_path(hash)).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => Error::Corrupt(format!("missing chunk {hash}")),
             _ => e.into(),
-        })?;
-        let data = match raw.split_first() {
-            Some((&RAW, rest)) => rest.to_vec(),
-            Some((&ZSTD, rest)) => zstd::decode_all(rest)?,
-            _ => return Err(Error::Corrupt(format!("unknown encoding of chunk {hash}"))),
-        };
-        if Hash::of(&data) != *hash {
-            return Err(Error::Corrupt(format!("chunk {hash} is damaged")));
+        })
+    }
+
+    pub fn raw_len(&self, hash: &Hash) -> Result<u64> {
+        Ok(fs::metadata(self.chunk_path(hash))?.len())
+    }
+
+    /// Stores a chunk received in stored form, after checking that it really
+    /// decodes to `hash` (remote data is never trusted blindly).
+    pub fn put_raw(&self, hash: &Hash, raw: &[u8]) -> Result<()> {
+        decode(hash, raw)?;
+        let path = self.chunk_path(hash);
+        if path.exists() {
+            return Ok(());
         }
-        Ok(data)
+        let parent = path.parent().expect("chunk path has a parent");
+        fs::create_dir_all(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(raw)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path).map_err(|e| e.error)?;
+        Ok(())
     }
 
     /// Splits a file into chunks, stores the ones not already present.
@@ -147,6 +168,18 @@ impl ObjectStore {
         }
         Ok((count, bytes))
     }
+}
+
+fn decode(hash: &Hash, raw: &[u8]) -> Result<Vec<u8>> {
+    let data = match raw.split_first() {
+        Some((&RAW, rest)) => rest.to_vec(),
+        Some((&ZSTD, rest)) => zstd::decode_all(rest)?,
+        _ => return Err(Error::Corrupt(format!("unknown encoding of chunk {hash}"))),
+    };
+    if Hash::of(&data) != *hash {
+        return Err(Error::Corrupt(format!("chunk {hash} is damaged")));
+    }
+    Ok(data)
 }
 
 /// Content hash of a file without storing it.
