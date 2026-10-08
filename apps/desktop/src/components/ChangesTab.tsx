@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, errorText, type Change, type Overview } from "../api";
-import { PlayButton } from "../player";
+import { CompareButton, PlayButton } from "../player";
 import { Empty, Icon, KindBadge, PathLabel, useToast } from "../ui";
 import { plural, short } from "../util";
 import { useFileActions } from "./useFileActions";
@@ -105,7 +105,13 @@ export function ChangesTab({
                   text={c.kind === "modified" ? "сейчас" : undefined}
                 />
               )}
-              {c.kind !== "added" && head && (
+              {c.kind === "modified" && head && (
+                <CompareButton
+                  a={{ root, rev: head, path: c.path, label: `Последняя версия ${short(head)}` }}
+                  b={{ root, rev: null, path: c.path, label: "Сейчас (не сохранено)" }}
+                />
+              )}
+              {c.kind === "deleted" && head && (
                 <PlayButton
                   track={{ root, rev: head, path: c.path, label: `Последняя версия ${short(head)}` }}
                   text="было"

@@ -85,6 +85,30 @@ export interface Stats {
   storedBytes: number;
 }
 
+export interface Analysis {
+  /** Content hash of the analyzed version. */
+  blob: string;
+  durationMs: number;
+  sampleRate: number;
+  channels: number;
+  /** Peak amplitude per point, 0–255 for 0.0–1.0. */
+  peaks: number[];
+  rms: number[];
+  /** Integrated loudness, LUFS; null for silence. */
+  lufs: number | null;
+}
+
+export interface Comment {
+  id: number;
+  snapshot: string;
+  path: string;
+  timecodeMs: number | null;
+  text: string;
+  author: string;
+  createdAt: number;
+  resolved: boolean;
+}
+
 /** Error shape produced by the Rust commands. */
 export interface CommandError {
   kind: string;
@@ -126,6 +150,14 @@ export const api = {
   previewFile: (root: string, rev: string | null, path: string) =>
     invoke<string>("preview_file", { root, rev, path }),
   watchProject: (root: string) => invoke<void>("watch_project", { root }),
+
+  analyzeAudio: (root: string, rev: string | null, path: string) =>
+    invoke<Analysis>("analyze_audio", { root, rev, path }),
+  comments: (root: string, rev: string | null, path: string) =>
+    invoke<Comment[]>("comments", { root, rev, path }),
+  addComment: (root: string, rev: string | null, path: string, timecodeMs: number | null, text: string) =>
+    invoke<number>("add_comment", { root, rev, path, timecodeMs, text }),
+  resolveComment: (root: string, id: number) => invoke<void>("resolve_comment", { root, id }),
 };
 
 export function isCommandError(e: unknown): e is CommandError {
@@ -145,6 +177,8 @@ const MESSAGES: Record<string, string> = {
   wouldOverwrite: "Это перезапишет файлы, которых нет в сохранённой версии.",
   pathNotFound: "Файла нет в этой версии.",
   corrupt: "Данные проекта повреждены.",
+  notAudio: "Не удалось прочитать звук: формат не поддерживается или файл повреждён.",
+  unsavedFile: "Файл изменён и не сохранён. Сохраните версию, чтобы оставлять к нему комментарии.",
 };
 
 export function errorText(e: unknown): string {

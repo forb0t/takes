@@ -1,6 +1,8 @@
 use std::fs;
 
-use takes_core::{Change, ChangeKind, Error, MergeKind, MergeOutcome, Repo, Resolution, Stats};
+use takes_core::{
+    Change, ChangeKind, Error, MergeKind, MergeOutcome, Repo, Resolution, Stats, hash_file,
+};
 use tempfile::TempDir;
 
 fn setup() -> (TempDir, Repo) {
@@ -518,4 +520,39 @@ fn busy_files_stop_switch_and_restore_before_touching_anything() {
     set_readonly(&repo, "song.wav", false);
     repo.switch("other").unwrap();
     assert_eq!(read(&repo, "song.wav"), b"other song");
+}
+
+#[test]
+fn comments_follow_file_content_across_versions() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "mix.wav", "mix 1");
+    write(&repo, "lyrics.txt", "v1");
+    repo.commit("mix 1", &[]).unwrap();
+    repo.add_comment("HEAD", "mix.wav", Some(30_000), "vocal too quiet")
+        .unwrap();
+
+    // The mix is unchanged in the next version: the comment still applies.
+    write(&repo, "lyrics.txt", "v2");
+    repo.commit("lyrics", &[]).unwrap();
+    let mix1 = repo.file_at("HEAD", "mix.wav").unwrap().blob;
+    let on_mix1 = repo.comments_on_content("mix.wav", mix1, false).unwrap();
+    assert_eq!(on_mix1.len(), 1);
+    assert_eq!(on_mix1[0].text, "vocal too quiet");
+
+    // A new mix starts with a clean slate.
+    write(&repo, "mix.wav", "mix 2");
+    repo.commit("mix 2", &[]).unwrap();
+    let mix2 = repo.file_at("HEAD", "mix.wav").unwrap().blob;
+    assert!(
+        repo.comments_on_content("mix.wav", mix2, false)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repo.comments_on_content("mix.wav", mix1, false)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(hash_file(&repo.root().join("mix.wav")).unwrap().0, mix2);
 }

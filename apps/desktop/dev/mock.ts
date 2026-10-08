@@ -62,6 +62,31 @@ const preview: MergePreview = {
   ],
 };
 
+/** A plausible song shape: intro, verses, louder choruses, outro. */
+function fakeWave(seed: number, loudness: number) {
+  const n = 1600;
+  const peaks: number[] = [];
+  const rms: number[] = [];
+  let x = seed;
+  for (let i = 0; i < n; i++) {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    const noise = (x / 2147483648) * 0.25;
+    const t = i / n;
+    const section = t < 0.08 ? 0.3 : t < 0.3 ? 0.55 : t < 0.45 ? 0.85 : t < 0.65 ? 0.6 : t < 0.85 ? 0.9 : 0.35 * (1 - (t - 0.85) / 0.15);
+    const beat = 0.85 + 0.15 * Math.sin(i * 0.9);
+    const p = Math.min(1, (section * beat + noise) * loudness);
+    peaks.push(Math.round(p * 255));
+    rms.push(Math.round(p * 0.55 * 255));
+  }
+  return { peaks, rms };
+}
+
+const comments = [
+  { id: 1, snapshot: id(6), path: "01 Intro.wav", timecodeMs: 42_000, text: "Бочка слишком громкая, съедает бас", author: "masha", createdAt: now - 7200, resolved: false },
+  { id: 2, snapshot: id(6), path: "01 Intro.wav", timecodeMs: 95_500, text: "Вот тут классный переход!", author: "nikita", createdAt: now - 5000, resolved: false },
+  { id: 3, snapshot: id(6), path: "01 Intro.wav", timecodeMs: 150_000, text: "Пад слишком широкий", author: "masha", createdAt: now - 86400, resolved: true },
+];
+
 mockConvertFileSrc("linux");
 mockIPC(
   (cmd, args) => {
@@ -101,6 +126,21 @@ mockIPC(
         return `/tmp/${a.path}`;
       case "watch_project":
         return null;
+      case "analyze_audio": {
+        const working = a.rev === null;
+        return {
+          blob: id(working ? 20 : 21),
+          durationMs: 198_000,
+          sampleRate: 48_000,
+          channels: 2,
+          ...fakeWave(working ? 7 : 3, working ? 1 : 0.7),
+          lufs: working ? -9.4 : -13.1,
+        };
+      }
+      case "comments":
+        return a.rev === null ? [] : comments;
+      case "add_comment":
+        return 4;
       default:
         console.info("mock: unhandled", cmd, a);
         return null;

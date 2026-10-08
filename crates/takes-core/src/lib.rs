@@ -28,4 +28,5 @@ pub use model::{
     Branch, Change, ChangeKind, Comment, Entry, FileVersion, Snapshot, Stats, Tag, Tree,
 };
 pub use repo::{DEFAULT_BRANCH, Repo, validate_name};
+pub use store::hash_file;
 pub use worktree::{IGNORE_FILE, META_DIR};

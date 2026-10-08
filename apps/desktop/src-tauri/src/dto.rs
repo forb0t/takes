@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use takes_core::{
-    Branch, Change, ChangeKind, Conflict, Entry, Error, FileVersion, MergeKind, MergeOutcome,
-    MergePreview, Resolution, Snapshot, Stats, Tag,
+    Branch, Change, ChangeKind, Comment, Conflict, Entry, Error, FileVersion, MergeKind,
+    MergeOutcome, MergePreview, Resolution, Snapshot, Stats, Tag,
 };
 
 fn kind(kind: ChangeKind) -> &'static str {
@@ -236,6 +236,43 @@ impl From<Stats> for StatsDto {
             snapshots: s.snapshots,
             content_bytes: s.content_bytes,
             stored_bytes: s.stored_bytes,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisDto {
+    /// Content hash, identifying the version for caching on the UI side.
+    pub blob: String,
+    #[serde(flatten)]
+    pub analysis: takes_audio::Analysis,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentDto {
+    pub id: i64,
+    pub snapshot: String,
+    pub path: String,
+    pub timecode_ms: Option<u64>,
+    pub text: String,
+    pub author: String,
+    pub created_at: i64,
+    pub resolved: bool,
+}
+
+impl From<&Comment> for CommentDto {
+    fn from(c: &Comment) -> Self {
+        Self {
+            id: c.id,
+            snapshot: c.snapshot.to_hex(),
+            path: c.path.clone(),
+            timecode_ms: c.timecode_ms,
+            text: c.text.clone(),
+            author: c.author.clone(),
+            created_at: c.created_at,
+            resolved: c.resolved,
         }
     }
 }

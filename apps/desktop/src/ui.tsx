@@ -29,6 +29,7 @@ const paths = {
   undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
   wave: "M3 12h2M7 8v8M11 5v14M15 9v6M19 7v10M21 12h0",
   edit: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
+  comment: "M4 5h16v11H9l-5 4z",
 } as const;
 
 export type IconName = keyof typeof paths;

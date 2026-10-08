@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/takes-core", "crates/takes-cli", "apps/desktop/src-tauri"]
+members = ["crates/takes-core", "crates/takes-cli", "apps/desktop/src-tauri", "crates/takes-audio"]
 
 [workspace.package]
 edition = "2024"
@@ -8,3 +8,11 @@ version = "0.1.0"
 license = "MIT"
 # let-chains and slice::as_chunks
 rust-version = "1.88"
+
+# Decoding audio and hashing large files is very slow without optimizations,
+# so optimize dependencies and the audio crate even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.takes-audio]
+opt-level = 3

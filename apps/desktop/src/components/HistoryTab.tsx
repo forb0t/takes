@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText, type Change, type Overview, type Snapshot } from "../api";
-import { PlayButton } from "../player";
+import { CompareButton, PlayButton } from "../player";
 import { Empty, Icon, KindBadge, PathLabel, PromptDialog } from "../ui";
 import {
   formatDate,
@@ -199,6 +199,12 @@ function VersionDetail({
               <PathLabel path={c.path} />
               {c.size !== null && <span className="size">{formatSize(c.size)}</span>}
               <div className="row-actions">
+                {c.kind === "modified" && snapshot.parents[0] && (
+                  <CompareButton
+                    a={{ root, rev: snapshot.parents[0], path: c.path, label: `До: ${short(snapshot.parents[0])}` }}
+                    b={{ root, rev: id, path: c.path, label: `Версия ${short(id)}` }}
+                  />
+                )}
                 {rev && (
                   <PlayButton
                     track={{

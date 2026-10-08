@@ -898,18 +898,27 @@ impl Repo {
              WHERE (?1 IS NULL OR path = ?1) AND (?2 OR resolved = 0)
              ORDER BY path, timecode_ms, id",
         )?;
-        let rows = stmt.query_map(params![path, include_resolved], |r| {
-            Ok(Comment {
-                id: r.get(0)?,
-                snapshot: r.get(1)?,
-                path: r.get(2)?,
-                timecode_ms: r.get::<_, Option<i64>>(3)?.map(|t| t as u64),
-                text: r.get(4)?,
-                author: r.get(5)?,
-                created_at: r.get(6)?,
-                resolved: r.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![path, include_resolved], comment_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Comments on `path` made on any version where it had exactly this
+    /// content, so feedback stays visible while the file is unchanged.
+    pub fn comments_on_content(
+        &self,
+        path: &str,
+        blob: Hash,
+        include_resolved: bool,
+    ) -> Result<Vec<Comment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.snapshot_id, c.path, c.timecode_ms, c.text, c.author, c.created_at,
+                    c.resolved
+             FROM comments c
+             JOIN snapshot_entries e ON e.snapshot_id = c.snapshot_id AND e.path = c.path
+             WHERE c.path = ?1 AND e.blob_hash = ?2 AND (?3 OR c.resolved = 0)
+             ORDER BY c.timecode_ms, c.id",
+        )?;
+        let rows = stmt.query_map(params![path, blob, include_resolved], comment_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1031,6 +1040,19 @@ impl Graph {
         }
         order
     }
+}
+
+fn comment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
+    Ok(Comment {
+        id: r.get(0)?,
+        snapshot: r.get(1)?,
+        path: r.get(2)?,
+        timecode_ms: r.get::<_, Option<i64>>(3)?.map(|t| t as u64),
+        text: r.get(4)?,
+        author: r.get(5)?,
+        created_at: r.get(6)?,
+        resolved: r.get(7)?,
+    })
 }
 
 fn is_busy(e: &io::Error) -> bool {

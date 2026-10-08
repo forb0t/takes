@@ -34,6 +34,10 @@ fn main() {
             commands::merge,
             commands::restore,
             commands::preview_file,
+            commands::analyze_audio,
+            commands::comments,
+            commands::add_comment,
+            commands::resolve_comment,
             watcher::watch_project,
         ])
         .run(tauri::generate_context!())

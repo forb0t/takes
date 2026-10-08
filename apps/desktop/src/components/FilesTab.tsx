@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText, type FileInfo, type FileVersion, type Overview } from "../api";
-import { PlayButton } from "../player";
+import { CompareButton, PlayButton } from "../player";
 import { Empty, Icon, KindBadge } from "../ui";
 import { formatDate, formatSize, short, splitPath } from "../util";
 import { useFileActions } from "./useFileActions";
@@ -149,6 +149,17 @@ function FileHistory({ root, path, onChanged }: { root: string; path: string; on
               </div>
               {exists && (
                 <div className="row-actions">
+                  {versions[i + 1] && versions[i + 1].kind !== "deleted" && (
+                    <CompareButton
+                      a={{
+                        root,
+                        rev: versions[i + 1].snapshot.id,
+                        path,
+                        label: `Предыдущая · ${versions[i + 1].snapshot.message}`,
+                      }}
+                      b={{ root, rev: id, path, label: `${short(id)} · ${v.snapshot.message}` }}
+                    />
+                  )}
                   <PlayButton track={{ root, rev: id, path, label: `Версия ${short(id)} · ${v.snapshot.message}` }} />
                   <button className="btn btn-small btn-ghost" onClick={() => actions.restore(path, id)}>
                     <Icon name="restore" size={14} /> Вернуть

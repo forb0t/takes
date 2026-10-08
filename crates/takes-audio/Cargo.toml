@@ -1,0 +1,15 @@
+[package]
+name = "takes-audio"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ebur128 = "0.1.10"
+serde = { version = "1.0.229", features = ["derive"] }
+symphonia = { version = "0.6.1", features = ["all"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"

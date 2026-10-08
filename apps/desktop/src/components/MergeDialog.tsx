@@ -8,7 +8,7 @@ import {
   type Overview,
   type Resolution,
 } from "../api";
-import { PlayButton } from "../player";
+import { CompareButton, PlayButton } from "../player";
 import { Icon, KindBadge, Modal, PathLabel, useToast } from "../ui";
 import { copyName, formatSize, plural, short, splitPath } from "../util";
 
@@ -200,6 +200,12 @@ function ConflictRow({
       <div className="conflict-head">
         <PathLabel path={path} />
         <div className="row-actions">
+          {conflict.ours && conflict.theirs && (
+            <CompareButton
+              a={{ root, rev: oursRev, path, label: `Из «${ours}»` }}
+              b={{ root, rev: theirs, path, label: `Из «${theirs}»` }}
+            />
+          )}
           {conflict.ours && (
             <PlayButton track={{ root, rev: oursRev, path, label: `Из «${ours}»` }} text={ours} />
           )}

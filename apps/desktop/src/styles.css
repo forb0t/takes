@@ -1188,29 +1188,26 @@ input[type="checkbox"] {
 /* ---- player ----------------------------------------------------------------------- */
 
 .player {
+  position: relative;
   grid-column: 2;
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 16px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px 12px;
   border-top: 1px solid var(--border);
   background: var(--panel);
 }
 
-.player-icon {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  color: #1a1009;
-  background: linear-gradient(135deg, #ffb35c, #f06a3c);
-  flex-shrink: 0;
+.player-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
 
 .player-info {
-  min-width: 0;
-  width: 240px;
+  flex: 1 1 160px;
+  min-width: 140px;
 }
 
 .player-title {
@@ -1228,14 +1225,309 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
-.player-audio {
+.player-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  font-size: 12.5px;
+}
+
+.player-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.transport {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: #1a1009;
+  background: var(--accent);
+  transition: transform 0.08s, background 0.12s;
+}
+
+.transport:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.transport:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.transport:disabled {
+  opacity: 0.4;
+}
+
+.time {
+  width: 44px;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.wave-wrap {
+  position: relative;
   flex: 1;
   min-width: 0;
 }
 
-.player-audio audio {
+.waveform {
+  --wave: #4c4955;
+  position: relative;
+  height: 56px;
+  cursor: pointer;
+}
+
+.waveform canvas {
+  display: block;
   width: 100%;
-  height: 36px;
+  height: 100%;
+}
+
+.waveform.loading canvas {
+  opacity: 0.5;
+}
+
+.wave-hover {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+}
+
+.wave-hover span {
+  position: absolute;
+  top: -2px;
+  left: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wave-mark {
+  position: absolute;
+  top: -4px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: #8fc7ff;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.wave-mark:hover {
+  background: #fff;
+}
+
+.wave-mark.resolved {
+  background: var(--faint);
+}
+
+.wave-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.ab-btn {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.ab-switch {
+  display: flex;
+  flex: 0 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ab-switch button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 250px;
+  min-width: 0;
+  padding: 5px 10px 5px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.ab-switch button:hover {
+  background: var(--raised);
+}
+
+.ab-switch button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.ab-letter {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  background: var(--hover);
+  font-weight: 700;
+}
+
+.ab-switch button.active .ab-letter {
+  background: var(--accent);
+  color: #1a1009;
+}
+
+.ab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+.ab-lufs {
+  flex-shrink: 0;
+  color: var(--faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-on {
+  color: var(--text);
+  background: var(--hover);
+}
+
+/* ---- comments ------------------------------------------------------------------------ */
+
+.comments-panel {
+  position: absolute;
+  right: 16px;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: min(460px, calc(100% - 32px));
+  max-height: 360px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.5);
+}
+
+.comments-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 6px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.comments-list {
+  flex: 1;
+  padding: 6px;
+}
+
+.comment {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.comment:hover {
+  background: var(--hover);
+}
+
+.comment.highlight {
+  background: rgba(143, 199, 255, 0.1);
+}
+
+.comment.resolved .comment-text {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+.comment-time {
+  flex-shrink: 0;
+  min-width: 42px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(143, 199, 255, 0.12);
+  color: #8fc7ff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.comment-time.none {
+  background: none;
+  color: var(--faint);
+}
+
+.comment-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.comment-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.comment-meta {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.comment-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.comment-form input:not([type]) {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  outline: none;
+}
+
+.comment-form input:not([type]):focus {
+  border-color: var(--accent);
+}
+
+.comment-at {
+  color: #8fc7ff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- toasts --------------------------------------------------------------------- */

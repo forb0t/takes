@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use takes_core::Repo;
+use takes_core::{Hash, Repo};
 use tauri::{AppHandle, Manager, State};
 
 use crate::dto::*;
@@ -292,9 +293,51 @@ pub async fn restore(
     blocking(move || Ok(open(&root)?.restore(&path, &rev, dest.as_deref(), force)?)).await
 }
 
+/// Copies a stored file version into the app cache (named by content hash,
+/// so each version is extracted once) and returns that copy and the hash.
+fn extract_version(repo: &Repo, cache: &Path, rev: &str, path: &str) -> CmdResult<(PathBuf, Hash)> {
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let entry = repo.file_at(rev, path)?;
+    let ext = Path::new(path)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+    let target = cache.join(format!("{}{ext}", entry.blob.to_hex()));
+    if !target.exists() {
+        fs::create_dir_all(cache)?;
+        // Unique temp name: playback and analysis may extract the same
+        // version at the same time.
+        let n = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
+        let tmp = cache.join(format!(
+            "{}.{}.{n}.partial",
+            entry.blob.to_hex(),
+            std::process::id()
+        ));
+        repo.export(rev, path, &tmp)?;
+        fs::rename(&tmp, &target)?;
+    }
+    Ok((target, entry.blob))
+}
+
+/// The local file holding a version (`rev: None` = the file on disk now).
+fn local_file(
+    repo: &Repo,
+    cache: &Path,
+    rev: Option<&str>,
+    path: &str,
+) -> CmdResult<(PathBuf, Hash)> {
+    match rev {
+        Some(rev) => extract_version(repo, cache, rev, path),
+        None => {
+            let abs = repo.abs(path)?;
+            let (hash, _) = takes_core::hash_file(&abs)?;
+            Ok((abs, hash))
+        }
+    }
+}
+
 /// A local file the web view can load (via the asset protocol) to play or
 /// show a file. `rev: None` means the current, possibly unsaved, file.
-/// Stored versions are extracted once into the cache, named by content hash.
 #[tauri::command]
 pub async fn preview_file(
     app: AppHandle,
@@ -305,22 +348,113 @@ pub async fn preview_file(
     let cache = app.path().app_cache_dir()?.join("previews");
     blocking(move || {
         let repo = open(&root)?;
-        let Some(rev) = rev else {
-            return Ok(repo.abs(&path)?.display().to_string());
+        let file = match rev {
+            None => repo.abs(&path)?,
+            Some(rev) => extract_version(&repo, &cache, &rev, &path)?.0,
         };
-        let entry = repo.file_at(&rev, &path)?;
-        let ext = Path::new(&path)
-            .extension()
-            .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-            .unwrap_or_default();
-        let target = cache.join(format!("{}{ext}", entry.blob.to_hex()));
-        if !target.exists() {
-            fs::create_dir_all(&cache)?;
-            let tmp = cache.join(format!("{}.partial", entry.blob.to_hex()));
-            repo.export(&rev, &path, &tmp)?;
-            fs::rename(&tmp, &target)?;
-        }
-        Ok(target.display().to_string())
+        Ok(file.display().to_string())
     })
     .await
+}
+
+// ---- audio ------------------------------------------------------------------
+
+/// Waveform and loudness of a file version, cached by content hash.
+#[tauri::command]
+pub async fn analyze_audio(
+    app: AppHandle,
+    root: String,
+    rev: Option<String>,
+    path: String,
+) -> CmdResult<AnalysisDto> {
+    let cache = app.path().app_cache_dir()?;
+    blocking(move || {
+        let repo = open(&root)?;
+        let (file, hash) = local_file(&repo, &cache.join("previews"), rev.as_deref(), &path)?;
+        let dir = cache.join("analysis");
+        let cached = dir.join(format!("v1-{}.json", hash.to_hex()));
+        if let Ok(analysis) = fs::read(&cached)
+            .map_err(CommandError::from)
+            .and_then(|b| serde_json::from_slice(&b).map_err(CommandError::other))
+        {
+            return Ok(AnalysisDto {
+                blob: hash.to_hex(),
+                analysis,
+            });
+        }
+        let analysis = takes_audio::analyze(&file).map_err(|e| CommandError {
+            kind: "notAudio",
+            ..CommandError::other(e)
+        })?;
+        fs::create_dir_all(&dir)?;
+        let tmp = dir.join(format!("{}.{}.partial", hash.to_hex(), std::process::id()));
+        fs::write(
+            &tmp,
+            serde_json::to_vec(&analysis).map_err(CommandError::other)?,
+        )?;
+        fs::rename(&tmp, &cached)?;
+        Ok(AnalysisDto {
+            blob: hash.to_hex(),
+            analysis,
+        })
+    })
+    .await
+}
+
+/// Comments on this exact content of the file (resolved ones included).
+#[tauri::command]
+pub async fn comments(
+    root: String,
+    rev: Option<String>,
+    path: String,
+) -> CmdResult<Vec<CommentDto>> {
+    blocking(move || {
+        let repo = open(&root)?;
+        let blob = match rev {
+            Some(rev) => repo.file_at(&rev, &path)?.blob,
+            None => takes_core::hash_file(&repo.abs(&path)?)?.0,
+        };
+        Ok(repo
+            .comments_on_content(&path, blob, true)?
+            .iter()
+            .map(Into::into)
+            .collect())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn add_comment(
+    root: String,
+    rev: Option<String>,
+    path: String,
+    timecode_ms: Option<u64>,
+    text: String,
+) -> CmdResult<i64> {
+    blocking(move || {
+        let repo = open(&root)?;
+        let rev = match rev {
+            Some(rev) => rev,
+            // The file on disk can be commented only if it is saved as is.
+            None => {
+                let current = takes_core::hash_file(&repo.abs(&path)?)?.0;
+                match repo.file_at("HEAD", &path) {
+                    Ok(saved) if saved.blob == current => "HEAD".to_owned(),
+                    _ => {
+                        return Err(CommandError {
+                            kind: "unsavedFile",
+                            ..CommandError::other("save a version to comment on this file")
+                        });
+                    }
+                }
+            }
+        };
+        Ok(repo.add_comment(&rev, &path, timecode_ms, text.trim())?)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn resolve_comment(root: String, id: i64) -> CmdResult<()> {
+    blocking(move || Ok(open(&root)?.resolve_comment(id)?)).await
 }
