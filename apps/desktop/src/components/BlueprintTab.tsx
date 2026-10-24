@@ -163,7 +163,7 @@ export function BlueprintTab({
 
   const drag = useRef<
     | { mode: "pan"; start: Point; origin: Point }
-    | { mode: "node"; key: NodeKey; start: Point; origin: Point; moved: boolean }
+    | { mode: "node"; key: NodeKey; start: Point; origin: Point; moved: boolean; at?: [number, number] }
     | null
   >(null);
 
@@ -194,7 +194,9 @@ export function BlueprintTab({
       setView((v) => ({ ...v, x: d.origin.x + dx, y: d.origin.y + dy }));
     } else if (d.moved || Math.abs(dx) + Math.abs(dy) > 3) {
       d.moved = true;
-      setPositions((p) => ({ ...p, [d.key]: [d.origin.x + dx / view.zoom, d.origin.y + dy / view.zoom] }));
+      const at: [number, number] = [d.origin.x + dx / view.zoom, d.origin.y + dy / view.zoom];
+      d.at = at;
+      setPositions((p) => ({ ...p, [d.key]: at }));
     }
   }
 
@@ -203,7 +205,8 @@ export function BlueprintTab({
     drag.current = null;
     if (!d) return;
     if (d.mode === "node") {
-      if (d.moved) savePositions(root, positions);
+      // `positions` may not have the last move rendered yet.
+      if (d.moved && d.at) savePositions(root, { ...positions, [d.key]: d.at });
       else setSelected(d.key);
     } else if (Math.abs(view.x - d.origin.x) + Math.abs(view.y - d.origin.y) < 3) {
       setSelected(null);
@@ -233,8 +236,8 @@ export function BlueprintTab({
   function arrange() {
     setPositions({});
     savePositions(root, {});
+    // Fitted again by the layout effect, once the new layout is rendered.
     fitted.current = false;
-    setTimeout(() => fit(overview.head ? diagram.nodes.get(`v:${overview.head}`) : undefined), 0);
   }
 
   // ---- actions ------------------------------------------------------------------
@@ -282,7 +285,11 @@ export function BlueprintTab({
       return [
         { label: "История файла", icon: "restore", run: () => onOpenFile(node.path) },
         { label: "Загрузить новую версию…", icon: "download", run: () => onUploadVersion(node.path) },
-        { label: "Показать в папке", icon: "folder", run: () => api.reveal(`${root}/${node.path}`) },
+        {
+          label: "Показать в папке",
+          icon: "folder",
+          run: () => api.reveal(`${root}/${node.path}`).catch((e) => toast(errorText(e), "error")),
+        },
       ];
     }
     if (node.kind === "branch") {
@@ -474,15 +481,17 @@ export function BlueprintTab({
           </div>
         )}
 
-        <div className="bp-toolbar" onPointerDown={(e) => e.stopPropagation()}>
-          <button className="btn btn-small" onClick={() => fit()} title="Показать всю схему">
-            Показать всё
-          </button>
-          <button className="btn btn-small" onClick={arrange} title="Вернуть узлы на свои места">
-            Упорядочить
-          </button>
-          <span className="muted">{Math.round(view.zoom * 100)}%</span>
-        </div>
+        {versions.length > 0 && (
+          <div className="bp-toolbar" onPointerDown={(e) => e.stopPropagation()}>
+            <button className="btn btn-small" onClick={() => fit()} title="Показать всю схему">
+              Показать всё
+            </button>
+            <button className="btn btn-small" onClick={arrange} title="Вернуть узлы на свои места">
+              Упорядочить
+            </button>
+            <span className="muted">{Math.round(view.zoom * 100)}%</span>
+          </div>
+        )}
         <div className="bp-legend muted">
           <span>
             <i className="bp-swatch exec" /> порядок версий

@@ -25,6 +25,10 @@ export function HistoryTab({ overview, onChanged }: { overview: Overview; onChan
   const branchesKey = overview.branches.map((b) => `${b.name}@${b.head}`).join();
 
   useEffect(() => setView(overview.branch), [overview.branch]);
+  // The branch on screen was deleted (here or on another device): show the current one.
+  useEffect(() => {
+    if (!overview.branches.some((b) => b.name === view && b.head)) setView(overview.branch);
+  }, [overview.branches, overview.branch, view]);
 
   useEffect(() => {
     let alive = true;

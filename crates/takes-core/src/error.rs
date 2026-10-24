@@ -18,6 +18,8 @@ pub enum Error {
     InvalidName(String),
     #[error("invalid path '{0}'")]
     InvalidPath(String),
+    #[error("{0} is in the project folder or contains it")]
+    OverlapsProject(PathBuf),
     #[error("invalid {0}: labels take up to 40 characters, keys up to 12, tempo 20–400 BPM")]
     InvalidMeta(String),
     #[error("branch '{0}' already exists")]

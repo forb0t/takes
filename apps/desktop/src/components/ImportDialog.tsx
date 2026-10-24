@@ -75,7 +75,7 @@ export function ImportDialog({
     } catch (e) {
       setError(
         isCommandError(e) && e.kind === "wouldOverwrite"
-          ? `В проекте есть несохранённые изменения в ${e.paths.map((p) => `«${p}»`).join(", ")}. Сохраните или отмените их, чтобы не потерять.`
+          ? `В папке проекта уже есть ${e.paths.map((p) => `«${p}»`).join(", ")} с несохранёнными изменениями или вне истории. Сохраните или переименуйте их, чтобы не потерять.`
           : errorText(e),
       );
     } finally {

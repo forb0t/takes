@@ -1,4 +1,6 @@
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+// The legacy build carries polyfills: the modern one needs JavaScript newer
+// than the system web views (WebKitGTK, older macOS Safari) provide.
+import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { useEffect, useRef, useState } from "react";
 import { api, errorText } from "./api";
 import type { Track } from "./player";
@@ -22,7 +24,7 @@ function PdfDocument({ track, width }: { track: Track; width: number }) {
     (async () => {
       try {
         const [pdfjs, bytes] = await Promise.all([
-          import("pdfjs-dist"),
+          import("pdfjs-dist/legacy/build/pdf.mjs"),
           api.fileBytes(track.root, track.rev, track.path),
         ]);
         pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;

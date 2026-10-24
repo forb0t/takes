@@ -842,11 +842,32 @@ fn files_and_folders_come_in_from_outside() {
         Err(Error::WouldOverwrite(p)) if p == ["Ночь.wav"]
     ));
     assert_eq!(read(&repo, "Ночь.wav"), b"unsaved");
-    // Files already in the project are not imported into it again.
+    // Files already in the project are not imported into it again, and a
+    // folder holding the project is not copied into it.
     assert!(matches!(
         repo.import(&[dir.path().join("Ночь.wav")], ""),
-        Err(Error::InvalidPath(_))
+        Err(Error::OverlapsProject(_))
     ));
+    let parent = dir.path().parent().unwrap().to_path_buf();
+    assert!(matches!(
+        repo.import(&[parent], ""),
+        Err(Error::OverlapsProject(_))
+    ));
+}
+
+#[test]
+fn importing_never_replaces_files_the_project_does_not_track() {
+    let (_dir, repo) = setup();
+    write(&repo, ".takesignore", "*.asd\n");
+    write(&repo, "kick.asd", "analysis made by the DAW");
+    let outside = TempDir::new().unwrap();
+    let source = outside.path().join("kick.asd");
+    fs::write(&source, "something else").unwrap();
+    assert!(matches!(
+        repo.import(&[source], ""),
+        Err(Error::WouldOverwrite(p)) if p == ["kick.asd"]
+    ));
+    assert_eq!(read(&repo, "kick.asd"), b"analysis made by the DAW");
 }
 
 #[test]

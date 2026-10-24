@@ -23,7 +23,8 @@ impl Repo {
     /// Copies files and folders from outside into the project folder,
     /// under `dest` ("" = the top). A folder comes with everything in it.
     /// A file with the name of a saved file becomes its new version; a file
-    /// with unsaved changes is never replaced. Nothing is copied unless all
+    /// with unsaved changes, or one the project does not track (ignored),
+    /// is never replaced. Nothing is copied unless all
     /// of it can be. The copies show up as changes, ready to be saved.
     pub fn import(&self, sources: &[PathBuf], dest: &str) -> Result<Vec<Imported>> {
         let dest = dest.trim_matches('/');
@@ -62,14 +63,12 @@ impl Repo {
         Ok(imported.remove(0))
     }
 
-    /// A source path, which must not be inside the project already.
+    /// A source path, which must not be inside the project already, nor a
+    /// folder holding the project (it would be copied into itself).
     fn outside(&self, source: &Path) -> Result<PathBuf> {
         let source = dunce::canonicalize(source)?;
-        if source.starts_with(&self.root) {
-            return Err(Error::InvalidPath(format!(
-                "{} is already in the project",
-                source.display()
-            )));
+        if source.starts_with(&self.root) || self.root.starts_with(&source) {
+            return Err(Error::OverlapsProject(source));
         }
         Ok(source)
     }
@@ -83,7 +82,8 @@ impl Repo {
                 return Err(Error::InvalidPath(format!("{target} is given twice")));
             }
         }
-        // Never replace work that is not saved.
+        // Only a saved, unchanged file may be replaced: never unsaved work,
+        // nor a file the project does not track (e.g. an ignored one).
         let unsaved: HashSet<String> = self
             .status()?
             .into_iter()
@@ -97,7 +97,8 @@ impl Repo {
         let mut blocked = Vec::new();
         for (_, target) in &plan {
             let abs = self.abs(target)?;
-            if abs.is_dir() || (abs.exists() && unsaved.contains(target)) {
+            let replaceable = saved.contains_key(target) && !unsaved.contains(target);
+            if abs.is_dir() || (abs.exists() && !replaceable) {
                 blocked.push(target.clone());
             }
         }

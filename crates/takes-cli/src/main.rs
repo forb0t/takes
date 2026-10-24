@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use takes_core::{
-    Blocked, Change, ChangeKind, Conflict, Entry, Error, MergeKind, MergeOutcome, RemoteConfig,
-    Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport, decode_text,
+    Blocked, Change, ChangeKind, Conflict, Entry, Error, Hash, MergeKind, MergeOutcome,
+    RemoteConfig, Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport, decode_text,
 };
 
 #[derive(Parser)]
@@ -329,11 +329,11 @@ fn run(command: Command) -> Result<ExitCode> {
                 .collect::<Result<Vec<_>>>()?;
             let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
             let mut saved = Vec::new();
-            repo.commit_each(&paths, |change| {
+            let ids = repo.commit_each(&paths, |change| {
                 saved.push(format_change(change));
                 message.clone()
             })?;
-            print_saved(&repo, &saved)?;
+            print_saved(&repo, &ids, &saved)?;
         }
 
         Command::Add {
@@ -352,7 +352,7 @@ fn run(command: Command) -> Result<ExitCode> {
                     _ => format!("New version of {}", change.path),
                 })
             }) {
-                Ok(_) => print_saved(&repo, &saved)?,
+                Ok(ids) => print_saved(&repo, &ids, &saved)?,
                 // Copied files identical to the saved ones.
                 Err(Error::NothingToCommit) => {
                     println!("Nothing new: the files are already saved.")
@@ -890,13 +890,11 @@ fn print_report(r: &SyncReport) {
     }
 }
 
-/// Lists the versions just saved, one per file.
-fn print_saved(repo: &Repo, saved: &[String]) -> Result<()> {
+/// Lists the versions just saved (oldest first), one per file.
+fn print_saved(repo: &Repo, ids: &[Hash], saved: &[String]) -> Result<()> {
     let branch = repo.current_branch()?;
-    let log = repo.log(None)?;
-    // The new versions are the latest ones, newest first in the log.
-    for (snapshot, change) in log.iter().take(saved.len()).rev().zip(saved) {
-        println!("[{branch} {}] {change}", snapshot.id.short());
+    for (id, change) in ids.iter().zip(saved) {
+        println!("[{branch} {}] {change}", id.short());
     }
     Ok(())
 }

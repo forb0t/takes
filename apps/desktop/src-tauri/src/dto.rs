@@ -416,6 +416,7 @@ impl From<Error> for CommandError {
             Error::AlreadyInitialized(_) => "alreadyInitialized",
             Error::InvalidName(_) => "invalidName",
             Error::InvalidPath(_) => "invalidPath",
+            Error::OverlapsProject(_) => "overlapsProject",
             Error::InvalidMeta(_) => "invalidMeta",
             Error::BranchExists(_) => "branchExists",
             Error::TagExists(_) => "tagExists",
