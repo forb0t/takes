@@ -535,18 +535,56 @@ export function BlueprintTab({
     api.setSharedSetting(root, key, JSON.stringify(value)).catch((e) => toast(errorText(e), "error"));
   }
 
-  function saveLayout(next: Layout) {
+  /** The layout and tiles as last changed, also by a change not drawn yet. */
+  const layoutNow = useRef(layout);
+  layoutNow.current = layout;
+  const tilesNow = useRef(tiles);
+  tilesNow.current = tiles;
+
+  function putLayout(next: Layout) {
     setLayout(next);
+    layoutNow.current = next;
     saveSetting(LAYOUT_KEY, next);
   }
 
-  /** The tiles as last changed, also by a change not drawn yet. */
-  const tilesNow = useRef(tiles);
-  tilesNow.current = tiles;
-  function saveTiles(next: Tile[]) {
+  function putTiles(next: Tile[]) {
     setTiles(next);
     tilesNow.current = next;
     saveSetting(TILES_KEY, next);
+  }
+
+  /** What Ctrl+Z takes back, newest last. */
+  const undo = useRef<{ at: number; back: () => void }[]>([]);
+
+  /**
+   * Remembers how things lie before a change, so Ctrl+Z can bring it back;
+   * `also` undoes what else the change does. Changes made together (within
+   * a moment) are one step.
+   */
+  function remember(also?: () => void) {
+    const last = undo.current[undo.current.length - 1];
+    if (!also && last && Date.now() - last.at < 300) return;
+    const layoutBefore = layoutNow.current;
+    const tilesBefore = tilesNow.current;
+    undo.current.push({
+      at: Date.now(),
+      back: () => {
+        also?.();
+        putLayout(layoutBefore);
+        putTiles(tilesBefore);
+      },
+    });
+    if (undo.current.length > 50) undo.current.shift();
+  }
+
+  function saveLayout(next: Layout) {
+    remember();
+    putLayout(next);
+  }
+
+  function saveTiles(next: Tile[]) {
+    remember();
+    putTiles(next);
   }
 
   /** The layout with every lane fixed where it is now: once arranged by hand, songs stay put. */
@@ -740,9 +778,22 @@ export function BlueprintTab({
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // F shows everything, + and − zoom, 0 returns to 100%, Ctrl+F finds.
+  // F shows everything, + and − zoom, 0 returns to 100%, Ctrl+F finds, Ctrl+Z takes back.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ" && !e.shiftKey) {
+        if ((e.target as HTMLElement).closest("input, textarea, [contenteditable]")) return;
+        if (document.querySelector(".modal-backdrop")) return;
+        const step = undo.current.pop();
+        e.preventDefault();
+        if (step) {
+          step.back();
+          toast("Отменено", "info");
+        } else {
+          toast("Отменять нечего", "info");
+        }
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyF" && !document.querySelector(".modal-backdrop")) {
         e.preventDefault();
         search.current?.focus();
@@ -776,6 +827,8 @@ export function BlueprintTab({
   /** A version goes to another branch of its song: only where it is drawn changes. */
   function moveToBranch(lane: Lane, n: SongVersion, to: string) {
     if (n.branch === to) return;
+    const before = { ...lane.branchOf };
+    remember(() => songs.sortInto(lane, before));
     songs.sortInto(lane, { [shortId(n.version.id)]: to });
     // It takes its place in the other row, wherever it was put by hand.
     const own = lane.names.map((name) => layout.nodes[name]).find((m) => m !== undefined);
@@ -1118,7 +1171,7 @@ export function BlueprintTab({
               "Красный заголовок — песня, синий — версия, серый — версия не из папки, оранжевый — файл не сохранён\n" +
               "Тащите полотно мышью (или средней кнопкой)\n" +
               "Колесо — прокрутка, Shift + колесо — вбок\n" +
-              "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё\n" +
+              "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё, Ctrl+F — найти, Ctrl+Z — отменить\n" +
               "Узлы, заголовки песен, заметки и рамки тащатся куда угодно\n" +
               "Версию можно бросить на другую ветку — она перенесётся туда\n" +
               "Правая кнопка — действия, на пустом месте — новые тайлы"
