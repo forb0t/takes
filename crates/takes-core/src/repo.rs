@@ -23,6 +23,7 @@ mod import;
 mod meta;
 mod settings;
 mod sync;
+mod transfer;
 pub use cleanup::Cleanup;
 pub use import::Imported;
 pub use meta::FileMeta;
@@ -30,6 +31,7 @@ pub use sync::{
     Blocked, Diverged, SyncPhase, SyncProgress, SyncReport, SyncState, find_remote_projects,
     is_remote_project,
 };
+pub use transfer::Transfer;
 
 pub const DEFAULT_BRANCH: &str = "main";
 
@@ -1028,9 +1030,11 @@ impl Repo {
     }
 
     /// Moves to another branch, replacing the working files with its latest
-    /// version. Refuses when there are unsaved changes, unless the branch is
-    /// at the current version: then no file changes and unsaved work simply
-    /// comes along (the usual case when starting a branch for it).
+    /// version. Refuses when saved files have unsaved changes, unless the
+    /// branch is at the current version: then no file changes and unsaved
+    /// work simply comes along (the usual case when starting a branch for
+    /// it). New files not saved yet come along too, unless the branch has a
+    /// file of the same name.
     pub fn switch(&mut self, name: &str) -> Result<()> {
         if name == self.current_branch()? {
             return Ok(());
@@ -1040,8 +1044,12 @@ impl Repo {
             .ok_or_else(|| Error::NoSuchBranch(name.into()))?;
         let _lock = self.lock_shared()?;
         if self.head()? != Some(target) {
-            self.ensure_clean()?;
-            self.apply_tree(&self.head_tree()?, &self.tree(target)?)?;
+            let (from, to) = (self.head_tree()?, self.tree(target)?);
+            let dirty = self.unsaved_in_the_way(&from, &to)?;
+            if !dirty.is_empty() {
+                return Err(Error::DirtyWorktree(dirty));
+            }
+            self.apply_tree(&from, &to)?;
         }
         self.conn
             .execute("UPDATE head SET branch = ?1 WHERE id = 1", [name])?;

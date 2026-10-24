@@ -65,7 +65,7 @@ impl Repo {
 
     /// A source path, which must not be inside the project already, nor a
     /// folder holding the project (it would be copied into itself).
-    fn outside(&self, source: &Path) -> Result<PathBuf> {
+    pub(super) fn outside(&self, source: &Path) -> Result<PathBuf> {
         let source = dunce::canonicalize(source)?;
         if source.starts_with(&self.root) || self.root.starts_with(&source) {
             return Err(Error::OverlapsProject(source));

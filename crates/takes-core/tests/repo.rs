@@ -2,7 +2,7 @@ use std::fs;
 
 use takes_core::{
     Change, ChangeKind, Error, FileMeta, MergeKind, MergeOutcome, Repo, Resolution, Stats,
-    hash_file,
+    Transfer, hash_file,
 };
 use tempfile::TempDir;
 
@@ -1017,4 +1017,113 @@ fn empty_files_are_never_taken_for_renames() {
             ch("b.txt", ChangeKind::Added)
         ]
     );
+}
+
+fn saved(repo: &Repo, rev: &str, path: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    repo.read_file(rev, path, &mut out).ok().map(|_| out)
+}
+
+#[test]
+fn new_files_do_not_stop_a_switch() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "v1");
+    repo.commit("v1", &[]).unwrap();
+    repo.create_branch("other", None).unwrap();
+    repo.switch("other").unwrap();
+    write(&repo, "song.wav", "v2");
+    repo.commit("v2", &[]).unwrap();
+    repo.switch("main").unwrap();
+
+    // A new file not saved yet comes along, like a bounce waiting to be saved.
+    write(&repo, "idea.wav", "new");
+    repo.switch("other").unwrap();
+    assert_eq!(read(&repo, "song.wav"), b"v2");
+    assert_eq!(read(&repo, "idea.wav"), b"new");
+    assert_eq!(changes(&repo), [ch("idea.wav", ChangeKind::Added)]);
+}
+
+#[test]
+fn a_branch_starts_with_a_file_from_outside() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "album take");
+    repo.commit("v1", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let remix = outside.path().join("song remix.wav");
+    fs::write(&remix, "remix take").unwrap();
+
+    let id = repo
+        .branch_with_file("remix", None, &remix, "song.wav", "remix")
+        .unwrap();
+    assert_eq!(repo.resolve("remix").unwrap(), id);
+    assert_eq!(saved(&repo, "remix", "song.wav").unwrap(), b"remix take");
+    // Where you are and what is in the folder stay as they were.
+    assert_eq!(repo.current_branch().unwrap(), "main");
+    assert_eq!(read(&repo, "song.wav"), b"album take");
+    assert!(changes(&repo).is_empty());
+
+    assert!(matches!(
+        repo.branch_with_file("remix", None, &remix, "song.wav", "again"),
+        Err(Error::BranchExists(_))
+    ));
+    fs::write(&remix, "album take").unwrap();
+    assert!(matches!(
+        repo.branch_with_file("same", None, &remix, "song.wav", "same"),
+        Err(Error::NothingToCommit)
+    ));
+    assert_eq!(repo.branches().unwrap().len(), 2);
+}
+
+#[test]
+fn a_version_moves_between_branches() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "main take");
+    write(&repo, "other.wav", "other");
+    repo.commit("v1", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let take = outside.path().join("acoustic.wav");
+    fs::write(&take, "acoustic take").unwrap();
+    repo.branch_with_file("acoustic", None, &take, "song.wav", "acoustic")
+        .unwrap();
+
+    // Into the current branch: the folder follows.
+    let into_main = Transfer {
+        rev: "acoustic",
+        path: "song.wav",
+        to: "main",
+        to_path: "song.wav",
+        from: "acoustic",
+        from_path: Some("song.wav"),
+    };
+    repo.move_version(&into_main, "put", "remove").unwrap();
+    assert_eq!(read(&repo, "song.wav"), b"acoustic take");
+    assert!(changes(&repo).is_empty());
+    assert_eq!(saved(&repo, "acoustic", "song.wav"), None);
+    assert_eq!(saved(&repo, "acoustic", "other.wav").unwrap(), b"other");
+
+    // Out of the current branch: unsaved work in the file stops it, and
+    // then nothing has changed on either branch.
+    let out_of_main = Transfer {
+        rev: "main",
+        path: "song.wav",
+        to: "acoustic",
+        to_path: "song.wav",
+        from: "main",
+        from_path: Some("song.wav"),
+    };
+    write(&repo, "song.wav", "unsaved");
+    assert!(matches!(
+        repo.move_version(&out_of_main, "put", "remove"),
+        Err(Error::DirtyWorktree(_))
+    ));
+    assert_eq!(saved(&repo, "acoustic", "song.wav"), None);
+    write(&repo, "song.wav", "acoustic take");
+    repo.move_version(&out_of_main, "put", "remove").unwrap();
+    assert!(!exists(&repo, "song.wav"));
+    assert!(changes(&repo).is_empty());
+    assert_eq!(
+        saved(&repo, "acoustic", "song.wav").unwrap(),
+        b"acoustic take"
+    );
+    assert_eq!(saved(&repo, "main", "song.wav"), None);
 }

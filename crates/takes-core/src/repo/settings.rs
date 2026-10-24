@@ -65,6 +65,18 @@ impl Repo {
              VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4)",
             params![key, value, at, self.author()?],
         )?;
+        self.forget_older(key)
+    }
+
+    /// Drops changes a later one replaced, sent or not: a setting changed
+    /// often (where things lie on the diagram) would pile them up, and only
+    /// the latest ever counts.
+    fn forget_older(&self, key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM setting_events WHERE key = ?1
+             AND at < (SELECT MAX(at) FROM setting_events WHERE key = ?1)",
+            [key],
+        )?;
         Ok(())
     }
 
@@ -90,10 +102,12 @@ impl Repo {
         if !valid(&event.key, &event.value) {
             return Ok(false);
         }
-        Ok(self.conn.execute(
+        let added = self.conn.execute(
             "INSERT OR IGNORE INTO setting_events (uid, key, value, at, author, pushed)
              VALUES (?1, ?2, ?3, ?4, ?5, 1)",
             params![event.uid, event.key, event.value, event.at, event.author],
-        )? > 0)
+        )? > 0;
+        self.forget_older(&event.key)?;
+        Ok(added)
     }
 }

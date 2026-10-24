@@ -36,6 +36,8 @@ fn main() {
             commands::set_author,
             commands::switch_branch,
             commands::create_branch,
+            commands::branch_with_file,
+            commands::move_version,
             commands::delete_branch,
             commands::create_tag,
             commands::delete_tag,

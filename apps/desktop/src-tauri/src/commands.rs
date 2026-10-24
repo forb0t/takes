@@ -450,6 +450,71 @@ pub async fn create_branch(
     .await
 }
 
+/// A new branch with a file from outside as its version of `path`: another
+/// take of a song. The current branch and the folder stay as they are.
+#[tauri::command]
+pub async fn branch_with_file(
+    root: String,
+    name: String,
+    from: Option<String>,
+    source: String,
+    path: String,
+) -> CmdResult<String> {
+    blocking(move || {
+        let mut repo = open(&root)?;
+        let song = path.rsplit('/').next().unwrap_or(&path);
+        let start = from.as_deref().unwrap_or("HEAD");
+        let known = repo.head()?.is_some() && repo.file_at(start, &path).is_ok();
+        let message = if known {
+            let file = Path::new(&source).file_name().map(|n| n.to_string_lossy());
+            format!("Другой вариант «{song}»: {}", file.unwrap_or_default())
+        } else {
+            format!("Новый файл «{song}»")
+        };
+        let id = repo.branch_with_file(
+            name.trim(),
+            from.as_deref(),
+            Path::new(&source),
+            &path,
+            &message,
+        )?;
+        Ok(id.to_hex())
+    })
+    .await
+}
+
+/// Moves a version of a file from one branch to another.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn move_version(
+    root: String,
+    rev: String,
+    path: String,
+    to: String,
+    to_path: String,
+    from: String,
+    from_path: Option<String>,
+) -> CmdResult<()> {
+    blocking(move || {
+        let song = to_path.rsplit('/').next().unwrap_or(&to_path);
+        let transfer = takes_core::Transfer {
+            rev: &rev,
+            path: &path,
+            to: &to,
+            to_path: &to_path,
+            from: &from,
+            from_path: from_path.as_deref(),
+        };
+        open(&root)?.move_version(
+            &transfer,
+            &format!("«{song}» перенесён из ветки «{from}»"),
+            &format!("«{song}» перенесён в ветку «{to}»"),
+        )?;
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn delete_branch(root: String, name: String) -> CmdResult<()> {
     blocking(move || Ok(open(&root)?.delete_branch(&name)?)).await
