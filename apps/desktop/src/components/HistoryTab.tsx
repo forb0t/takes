@@ -14,6 +14,7 @@ import {
   splitPath,
   type Label,
 } from "../util";
+import { BranchDialog } from "./BranchDialog";
 import { useFileActions } from "./useFileActions";
 
 export function HistoryTab({ overview, onChanged }: { overview: Overview; onChanged: () => void }) {
@@ -167,7 +168,7 @@ export function VersionDetail({
   }, [root, snapshot.id]);
 
   const id = snapshot.id;
-  const label = `версия ${short(id)}`;
+  const label = `версии ${short(id)}`;
 
   async function exportZip() {
     const name = labels?.find((l) => l.kind === "tag")?.text ?? short(id);
@@ -305,17 +306,11 @@ export function VersionDetail({
         />
       )}
       {dialog === "branch" && (
-        <PromptDialog
-          title="Новая ветка"
-          label="Название ветки"
-          placeholder="Например: acoustic"
-          confirm="Создать и перейти"
-          hint={`Ветка начнётся с ${label}. Файлы в папке заменятся на эту версию.`}
-          onSubmit={async (name) => {
-            await api.createBranch(root, name, id, true);
-            onChanged();
-          }}
+        <BranchDialog
+          overview={overview}
+          from={{ rev: id, label }}
           onClose={() => setDialog(null)}
+          onCreated={onChanged}
         />
       )}
     </div>

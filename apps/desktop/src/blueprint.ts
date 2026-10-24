@@ -10,6 +10,8 @@ import type { FileStatus, ProjectFile } from "./components/FilesTab";
 import { naturalCompare } from "./util";
 
 /** Geometry, in canvas pixels at 100%. */
+/** The title of a lane's frame. */
+export const TITLE_H = 30;
 export const SONG_W = 248;
 export const NODE_W = 232;
 export const NODE_H = 104;
@@ -44,6 +46,8 @@ export interface SongVersion {
   branches: Branch[];
   /** In the history of the current branch. */
   onCurrent: boolean;
+  /** The branch whose line this version is drawn on; null for one only a tag or an old merge leads to. */
+  owner: string | null;
   /** The content the project folder has now. */
   inFolder: boolean;
   col: number;
@@ -69,6 +73,10 @@ export type LaneStatus = FileStatus | "removed" | "elsewhere";
 
 export interface Lane {
   path: string;
+  /** Every name the song had, its current one first. */
+  names: string[];
+  /** Branch → the song's name in that branch's latest version, where it has the song. */
+  tipPaths: Record<string, string>;
   status: LaneStatus;
   nodes: LaneNode[];
   rows: number;
@@ -79,11 +87,83 @@ export interface Lane {
   branchNames: string[];
 }
 
-export const laneHeight = (lane: Lane) => LANE_PAD * 2 + lane.rows * ROW_H - (ROW_H - NODE_H);
-export const laneWidth = (lane: Lane) =>
-  lane.cols ? FIRST_X + lane.cols * COL_W - (COL_W - NODE_W) + LANE_PAD : LANE_PAD * 2 + SONG_W;
 export const nodeX = (col: number) => FIRST_X + col * COL_W;
-export const nodeY = (row: number) => LANE_PAD + row * ROW_H;
+export const nodeY = (row: number) => TITLE_H + LANE_PAD + row * ROW_H;
+
+export type Point = { x: number; y: number };
+export type Rect = { x: number; y: number; w: number; h: number };
+
+/** Where things lie on the diagram, shared by every device of the project. */
+export interface Layout {
+  /** Song → where its lane lies. */
+  lanes: Record<string, [number, number]>;
+  /** Song → node → where the node lies, from its lane's place. */
+  nodes: Record<string, Record<string, [number, number]>>;
+}
+
+/** The song's own node, as the layout knows it. */
+export const SONG_KEY = "song";
+/** A node as the layout knows it: the file on disk keeps its key across versions. */
+export const nodeKey = (n: LaneNode) => (n.kind === "work" ? "work" : n.key);
+export const nodeSize = (key: string) => ({ w: key === SONG_KEY ? SONG_W : NODE_W, h: NODE_H });
+
+export interface PlacedLane {
+  lane: Lane;
+  /** Where the lane lies; its nodes are placed from here. */
+  origin: Point;
+  /** Each node's place from the origin, the song's own under SONG_KEY. */
+  at: Map<string, Point>;
+  /** The frame around the nodes, from the origin. */
+  frame: Rect;
+  /** Placed by hand; the others go one under another below. */
+  pinned: boolean;
+}
+
+/** The frame around a lane's nodes, with its title on top. */
+export function frameOf(at: Map<string, Point>): Rect {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const [key, p] of at) {
+    const { w, h } = nodeSize(key);
+    x0 = Math.min(x0, p.x);
+    y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x + w);
+    y1 = Math.max(y1, p.y + h);
+  }
+  return {
+    x: x0 - LANE_PAD,
+    y: y0 - LANE_PAD - TITLE_H,
+    w: x1 - x0 + LANE_PAD * 2,
+    h: y1 - y0 + LANE_PAD * 2 + TITLE_H,
+  };
+}
+
+/** Places every lane and node: where people put them, or laid out in order. */
+export function placeLanes(lanes: Lane[], layout: Layout): PlacedLane[] {
+  const placed = lanes.map((lane): PlacedLane => {
+    const saved = lane.names.map((n) => layout.nodes[n]).find((m) => m !== undefined) ?? {};
+    const at = new Map<string, Point>();
+    const put = (key: string, auto: Point) => {
+      const p = saved[key];
+      at.set(key, p ? { x: p[0], y: p[1] } : auto);
+    };
+    put(SONG_KEY, { x: LANE_PAD, y: TITLE_H + LANE_PAD });
+    for (const n of lane.nodes) put(nodeKey(n), { x: nodeX(n.col), y: nodeY(n.row) });
+    const pos = lane.names.map((n) => layout.lanes[n]).find((p) => p !== undefined);
+    return { lane, origin: pos ? { x: pos[0], y: pos[1] } : { x: 0, y: 0 }, at, frame: frameOf(at), pinned: !!pos };
+  });
+  const pinned = placed.filter((p) => p.pinned);
+  let y = pinned.length ? Math.max(...pinned.map((p) => p.origin.y + p.frame.y + p.frame.h)) + LANE_GAP * 2 : 0;
+  const x = pinned.length ? Math.min(...pinned.map((p) => p.origin.x + p.frame.x)) : 0;
+  for (const p of placed) {
+    if (p.pinned) continue;
+    p.origin = { x: x - p.frame.x, y: y - p.frame.y };
+    y += p.frame.h + LANE_GAP;
+  }
+  return placed;
+}
 
 /** A stable colour per song. */
 export function songHue(path: string): number {
@@ -172,6 +252,7 @@ export function buildLanes(
         number: null,
         branches: [],
         onCurrent: false,
+        owner: null,
         inFolder: false,
         col: 0,
         row: 0,
@@ -235,24 +316,28 @@ export function buildLanes(
 
     const rowOf = new Map<string, number>();
     let rows = 0;
-    const claim = (start: string) => {
+    const claim = (start: string, owner: string | null) => {
       let key: string | undefined = start;
       let took = false;
       while (key && nodes.has(key) && !rowOf.has(key)) {
         rowOf.set(key, rows);
+        nodes.get(key)!.owner = owner;
         took = true;
         key = nodes.get(key)!.parents[0];
       }
       if (took) rows++;
     };
     const tips = new Map<string, Branch[]>();
+    const tipPaths: Record<string, string> = {};
     for (const b of branchOrder) {
       for (const key of tipsAt(b.head, names)) {
-        claim(key);
+        claim(key, b.name);
         tips.set(key, [...(tips.get(key) ?? []), b]);
+        const node = nodes.get(key)!;
+        if (node.change !== "deleted") tipPaths[b.name] = node.path;
       }
     }
-    for (const node of [...list].reverse()) claim(node.key); // only tags or old merges lead here
+    for (const node of [...list].reverse()) claim(node.key, null); // only tags or old merges lead here
     for (const node of list) node.row = rowOf.get(node.key) ?? 0;
 
     // Branch names only where branches disagree about the song.
@@ -284,6 +369,8 @@ export function buildLanes(
 
     lanes.push({
       path,
+      names: [path, ...[...names].filter((n) => n !== path)],
+      tipPaths,
       status: file ? file.status : removed.has(path) ? "removed" : "elsewhere",
       nodes: laneNodes,
       rows: Math.max(rows, 1),

@@ -182,14 +182,34 @@ export function ProjectView({ root }: { root: string }) {
   );
   const labelsChanged = useCallback(() => setLabelsVersion((v) => v + 1), []);
 
-  // Files dragged onto the window from a file manager are added.
+  // Files dragged onto the window from a file manager are added, unless
+  // they land on something that takes a file (a song to come on the diagram).
   useEffect(() => {
+    let over: HTMLElement | null = null;
+    const targetAt = ({ x, y }: { x: number; y: number }) => {
+      const scale = window.devicePixelRatio || 1;
+      return document.elementFromPoint(x / scale, y / scale)?.closest<HTMLElement>("[data-file-drop]") ?? null;
+    };
+    const hover = (target: HTMLElement | null) => {
+      if (target === over) return;
+      over?.classList.remove("drop-over");
+      target?.classList.add("drop-over");
+      over = target;
+    };
     const unlisten = getCurrentWebview().onDragDropEvent((e) => {
-      if (e.payload.type === "enter" || e.payload.type === "over") setDropping(true);
-      else if (e.payload.type === "leave") setDropping(false);
-      else if (e.payload.type === "drop") {
+      if (e.payload.type === "enter" || e.payload.type === "over") {
+        const target = targetAt(e.payload.position);
+        hover(target);
+        setDropping(!target);
+      } else if (e.payload.type === "leave") {
+        hover(null);
         setDropping(false);
-        if (e.payload.paths.length > 0) setImporting({ sources: e.payload.paths });
+      } else if (e.payload.type === "drop") {
+        const target = targetAt(e.payload.position);
+        hover(null);
+        setDropping(false);
+        if (target) target.dispatchEvent(new CustomEvent("filedrop", { detail: e.payload.paths }));
+        else if (e.payload.paths.length > 0) setImporting({ sources: e.payload.paths });
       }
     });
     return () => {

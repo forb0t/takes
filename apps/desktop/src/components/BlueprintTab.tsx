@@ -1,65 +1,117 @@
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, errorText, type ChangeKind, type GraphVersion, type Overview, type RemovedFile } from "../api";
 import {
-  LANE_GAP,
-  LANE_PAD,
   NODE_H,
   NODE_W,
   PIN_Y,
+  SONG_KEY,
   SONG_W,
   buildLanes,
+  frameOf,
   laneGroup,
-  laneHeight,
-  laneWidth,
-  nodeX,
-  nodeY,
+  nodeKey,
+  placeLanes,
   previousVersion,
   songHue,
   wire,
   type Lane,
   type LaneNode,
+  type Layout,
+  type PlacedLane,
+  type Point,
+  type Rect,
   type SongVersion,
   type WorkNode,
 } from "../blueprint";
 import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast, type IconName } from "../ui";
-import { formatDate, plural, previewKind, short, splitPath } from "../util";
+import { baseName, formatDate, plural, previewKind, short, splitPath } from "../util";
+import { BranchDialog } from "./BranchDialog";
 import { FileDetail, type Drafts, type ProjectFile } from "./FilesTab";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { useFileActions } from "./useFileActions";
 
-/** The song order, shared by every device of the project. */
+/** Shared by every device of the project: the song order, where things lie, the tiles. */
 const ORDER_KEY = "songs.order";
+const LAYOUT_KEY = "canvas.layout";
+const TILES_KEY = "canvas.tiles";
+/** Reading the project back right after an edit here may still give the old value. */
+const SETTLE_MS = 3000;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.5;
-/** A grid cell, in canvas pixels; every eighth line is a dark one. */
+/** A grid cell, in canvas pixels; every eighth line is a dark one. Things snap to it. */
 const GRID = 16;
 
 type View = { x: number; y: number; zoom: number };
-type Placed = { lane: Lane; y: number; w: number; h: number };
-type Reorder = { path: string; to: number; dy: number };
 type Selection = { path: string; key: string | null; draft: boolean; n: number };
-type MenuItem = { label: string; icon: IconName; run: () => void };
+type MenuItem = { label: string; icon: IconName; run: () => void; danger?: boolean };
 type Menu = { x: number; y: number; items: MenuItem[] };
-type Prompt = { kind: "branch" | "tag"; rev: string; label: string };
 type Meta = { path: string; rev: string; label: string };
+type BranchStart = { from?: { rev: string; label: string }; song?: string };
 
-const WORK_WORD: Record<ChangeKind, string> = {
-  added: "новый файл",
-  modified: "изменён",
-  deleted: "удалён с диска",
-  renamed: "переименован",
+/** Something on the canvas that is not a file: a note, a song to come, a frame grouping things. */
+interface Tile {
+  id: string;
+  kind: "note" | "song" | "frame";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  title: string;
+  text: string;
+  /** A hue, 0–360. */
+  color: number;
+}
+
+const TILE_NEW: Record<Tile["kind"], Pick<Tile, "w" | "h" | "title" | "color">> = {
+  note: { w: 256, h: 160, title: "Заметка", color: 48 },
+  song: { w: SONG_W, h: 144, title: "Новая песня", color: 0 },
+  frame: { w: 720, h: 400, title: "Группа", color: 210 },
 };
+const TILE_MIN = { w: 160, h: 80 };
+const COLORS: [string, number][] = [
+  ["Жёлтый", 48],
+  ["Зелёный", 130],
+  ["Голубой", 190],
+  ["Синий", 225],
+  ["Фиолетовый", 275],
+  ["Красный", 0],
+];
 
-/** What the lanes ask of the diagram, read when it happens so it is always current. */
-interface LaneActions {
+/** What is being dragged, and how far, in canvas pixels. */
+type Drag =
+  | { kind: "node"; lane: string; key: string; by: Point; branch: string | null }
+  | { kind: "lane"; lane: string; by: Point }
+  | { kind: "tile"; id: string; by: Point; lanes: string[]; tiles: string[] }
+  | { kind: "size"; id: string; by: Point };
+
+/** What lanes and tiles ask of the diagram, read when it happens so it is always current. */
+interface Actions {
   select: (path: string, key: string | null, draft?: boolean) => void;
   songMenu: (e: React.MouseEvent, lane: Lane) => void;
   versionMenu: (e: React.MouseEvent, lane: Lane, n: SongVersion) => void;
   workMenu: (e: React.MouseEvent, lane: Lane, n: WorkNode) => void;
   save: (n: WorkNode) => void;
-  reorder: (e: React.PointerEvent, lane: Lane) => void;
+  dragLane: (e: React.PointerEvent, lane: Lane) => void;
+  dragNode: (e: React.PointerEvent, lane: Lane, key: string) => void;
+  dragTile: (e: React.PointerEvent, tile: Tile) => void;
+  sizeTile: (e: React.PointerEvent, tile: Tile) => void;
+  selectTile: (id: string) => void;
+  tileMenu: (e: React.MouseEvent, tile: Tile) => void;
+  editTile: (id: string | null) => void;
+  updateTile: (id: string, change: Partial<Tile>) => void;
+  fillTile: (tile: Tile, source?: string) => void;
 }
+
+/** While dragging, the pointer passing over text must not select it. */
+function noSelecting(on: boolean) {
+  document.documentElement.classList.toggle("no-select", on);
+  if (on) window.getSelection()?.removeAllRanges();
+}
+
+const snap = (v: number) => Math.round(v / GRID) * GRID;
+const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
 /** Where the diagram was looked at, per project, so it opens there again. */
 function loadView(root: string): View | null {
@@ -78,6 +130,44 @@ function saveView(root: string, view: View) {
     // A convenience: the diagram fits itself without it.
   }
 }
+
+function parseLayout(value: string | null): Layout {
+  try {
+    const v = JSON.parse(value ?? "null");
+    if (v && typeof v === "object") return { lanes: v.lanes ?? {}, nodes: v.nodes ?? {} };
+  } catch {
+    // Written by a newer version, or broken: lay out anew.
+  }
+  return { lanes: {}, nodes: {} };
+}
+
+function parseTiles(value: string | null): Tile[] {
+  try {
+    const list: unknown = JSON.parse(value ?? "[]");
+    if (!Array.isArray(list)) return [];
+    return list.filter(
+      (t): t is Tile =>
+        !!t &&
+        typeof t.id === "string" &&
+        ["note", "song", "frame"].includes(t.kind) &&
+        [t.x, t.y, t.w, t.h, t.color].every(Number.isFinite) &&
+        typeof t.title === "string" &&
+        typeof t.text === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+const inside = (a: Rect, b: Rect) => a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
+const laneRect = (p: PlacedLane): Rect => ({ ...p.frame, x: p.origin.x + p.frame.x, y: p.origin.y + p.frame.y });
+
+const WORK_WORD: Record<ChangeKind, string> = {
+  added: "новый файл",
+  modified: "изменён",
+  deleted: "удалён с диска",
+  renamed: "переименован",
+};
 
 function laneText(lane: Lane): string {
   const saved = `${lane.versions} ${plural(lane.versions, "версия", "версии", "версий")}`;
@@ -100,10 +190,12 @@ function laneText(lane: Lane): string {
 }
 
 /**
- * The project as a blueprint: a lane per song, framed like a comment, that
- * starts with the song's node and wires its versions from left to right,
- * forks for other branches and the file on disk at the end when it is not
- * saved. The canvas pans and zooms; everything a file allows is done here.
+ * The project as a blueprint: a framed lane per song that starts with the
+ * song's node and wires its versions from left to right, forks for other
+ * branches and the file on disk at the end when it is not saved. Lanes,
+ * nodes and tiles (notes, songs to come, frames) go wherever they are
+ * dragged, for every device of the project; a version dropped on another
+ * branch moves there. Everything a file allows is done right here.
  */
 export function BlueprintTab({
   overview,
@@ -137,23 +229,28 @@ export function BlueprintTab({
   const [versions, setVersions] = useState<GraphVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [order, setOrder] = useState<string[]>([]);
+  const [layout, setLayout] = useState<Layout>({ lanes: {}, nodes: {} });
+  const [tiles, setTiles] = useState<Tile[]>([]);
   const [savedView] = useState(() => loadView(root));
   const [view, setView] = useState<View>(savedView ?? { x: 32, y: 32, zoom: 1 });
-  const [size, setSize] = useState({ w: 0, h: 0 });
   const [selected, setSelected] = useState<Selection | null>(null);
+  const [selectedTile, setSelectedTile] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
   const [menu, setMenu] = useState<Menu | null>(null);
-  const [prompt, setPrompt] = useState<Prompt | null>(null);
+  const [tagging, setTagging] = useState<{ rev: string; label: string } | null>(null);
+  const [branching, setBranching] = useState<BranchStart | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
   /** The file being renamed. */
   const [renaming, setRenaming] = useState<string | null>(null);
   const [showRemoved, setShowRemoved] = useState(false);
-  const [reorder, setReorder] = useState<Reorder | null>(null);
+  const [drag, setDrag] = useState<Drag | null>(null);
   const [panning, setPanning] = useState(false);
   const [box, setBox] = useState<HTMLDivElement | null>(null);
   const fitted = useRef(savedView !== null);
   const pan = useRef<{ x: number; y: number; origin: View; moved: boolean } | null>(null);
-  /** A pan just ended: the click that follows is not a click on a node. */
-  const panned = useRef(false);
+  /** A drag just ended: the click that follows is not a click on what was under it. */
+  const suppressClick = useRef(false);
+  const localEdit = useRef(0);
   const branchesKey = overview.branches.map((b) => `${b.name}@${b.head}`).join();
 
   useEffect(() => {
@@ -167,21 +264,26 @@ export function BlueprintTab({
     };
   }, [root, branchesKey, refreshKey]);
 
-  // Another device may have reordered the songs; a sync moves branches too.
+  // Another device may have moved things; a sync reloads the overview.
   useEffect(() => {
     let alive = true;
-    api
-      .sharedSetting(root, ORDER_KEY)
-      .then((value) => {
-        if (!alive || !value) return;
-        const list: unknown = JSON.parse(value);
-        if (Array.isArray(list)) setOrder(list.filter((p): p is string => typeof p === "string"));
+    Promise.all([ORDER_KEY, LAYOUT_KEY, TILES_KEY].map((key) => api.sharedSetting(root, key)))
+      .then(([orderValue, layoutValue, tilesValue]) => {
+        if (!alive || Date.now() - localEdit.current < SETTLE_MS) return;
+        try {
+          const list: unknown = JSON.parse(orderValue ?? "[]");
+          if (Array.isArray(list)) setOrder(list.filter((p): p is string => typeof p === "string"));
+        } catch {
+          // Keep the order there is.
+        }
+        setLayout(parseLayout(layoutValue));
+        setTiles(parseTiles(tilesValue));
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [root, branchesKey]);
+  }, [root, overview]);
 
   const removedPaths = useMemo(() => new Set(removed.map((r) => r.path)), [removed]);
   const lanes = useMemo(
@@ -192,14 +294,39 @@ export function BlueprintTab({
     () => lanes?.filter((l) => showRemoved || l.status !== "removed") ?? [],
     [lanes, showRemoved],
   );
+  const basePlaced = useMemo(() => placeLanes(visible, layout), [visible, layout]);
+
+  // What is being dragged follows the pointer; the rest keeps its objects, so it is not drawn again.
   const placed = useMemo(() => {
-    let y = 0;
-    return visible.map((lane): Placed => {
-      const at = { lane, y, w: laneWidth(lane), h: laneHeight(lane) };
-      y += at.h + LANE_GAP;
-      return at;
+    if (!drag || drag.kind === "size") return basePlaced;
+    const moved = drag.kind === "lane" ? [drag.lane] : drag.kind === "tile" ? drag.lanes : [];
+    return basePlaced.map((p) => {
+      if (moved.includes(p.lane.path)) {
+        return { ...p, origin: { x: p.origin.x + drag.by.x, y: p.origin.y + drag.by.y } };
+      }
+      if (drag.kind === "node" && p.lane.path === drag.lane) {
+        const at = new Map(p.at);
+        const was = at.get(drag.key)!;
+        at.set(drag.key, { x: was.x + drag.by.x, y: was.y + drag.by.y });
+        return { ...p, at, frame: frameOf(at) };
+      }
+      return p;
     });
-  }, [visible]);
+  }, [basePlaced, drag]);
+
+  const shownTiles = useMemo(() => {
+    if (!drag || (drag.kind !== "tile" && drag.kind !== "size")) return tiles;
+    return tiles.map((t) => {
+      if (drag.kind === "size" && t.id === drag.id) {
+        return { ...t, w: Math.max(TILE_MIN.w, t.w + drag.by.x), h: Math.max(TILE_MIN.h, t.h + drag.by.y) };
+      }
+      if (drag.kind === "tile" && (t.id === drag.id || drag.tiles.includes(t.id))) {
+        return { ...t, x: t.x + drag.by.x, y: t.y + drag.by.y };
+      }
+      return t;
+    });
+  }, [tiles, drag]);
+
   const fileByPath = useMemo(() => new Map((files ?? []).map((f) => [f.path, f])), [files]);
   const tagsOf = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -207,50 +334,77 @@ export function BlueprintTab({
     return map;
   }, [overview.tags]);
 
+  useEffect(() => {
+    if (!menu) return;
+    const close = (e: Event) => !(e.target as Element | null)?.closest?.(".bp-menu") && setMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(null);
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", close);
+    };
+  }, [menu]);
+
+  const select = useCallback((path: string, key: string | null, draft = false) => {
+    setSelectedTile(null);
+    setSelected((s) => ({ path, key, draft, n: (s?.n ?? 0) + 1 }));
+  }, []);
+
   // ---- view: fit, pan, zoom -----------------------------------------------------
 
-  /** Everything in sight, or the start of the first songs when that would be too small to read. */
+  /** Everything there is, from the lanes and the tiles. */
+  const bounds = useCallback((): Rect | null => {
+    const rects = [...basePlaced.map(laneRect), ...tiles];
+    if (!rects.length) return null;
+    const x = Math.min(...rects.map((r) => r.x));
+    const y = Math.min(...rects.map((r) => r.y));
+    return {
+      x,
+      y,
+      w: Math.max(...rects.map((r) => r.x + r.w)) - x,
+      h: Math.max(...rects.map((r) => r.y + r.h)) - y,
+    };
+  }, [basePlaced, tiles]);
+
+  /** Everything in sight, or its top left when that would be too small to read. */
   const fit = useCallback(() => {
-    if (!box || !placed.length) return;
+    const b = bounds();
+    if (!box || !b) return;
     const { width, height } = box.getBoundingClientRect();
-    const last = placed[placed.length - 1];
-    const w = Math.max(...placed.map((p) => p.w));
-    const h = last.y + last.h;
     const m = 32;
-    const whole = Math.min(1, (width - m * 2) / w, (height - m * 2) / h);
-    if (whole >= 0.6) {
-      setView({ zoom: whole, x: (width - w * whole) / 2, y: Math.min(m * 2, (height - h * whole) / 2) });
-    } else {
-      setView({ zoom: Math.min(1, Math.max(0.85, (width - m * 2) / w)), x: m, y: m });
-    }
-  }, [box, placed]);
+    const whole = Math.min(1, (width - m * 2) / b.w, (height - m * 2) / b.h);
+    const zoom = whole >= 0.6 ? whole : Math.min(1, Math.max(0.85, (width - m * 2) / b.w));
+    setView({
+      zoom,
+      x: whole >= 0.6 ? (width - b.w * zoom) / 2 - b.x * zoom : m - b.x * zoom,
+      y: whole >= 0.6 ? Math.min(m * 2, (height - b.h * zoom) / 2) - b.y * zoom : m - b.y * zoom,
+    });
+  }, [box, bounds]);
 
   // The first look: where it was left, unless nothing would be in sight.
   useLayoutEffect(() => {
-    if (!box || !placed.length) return;
+    const b = bounds();
+    if (!box || !b) return;
     if (fitted.current) {
       const { width, height } = box.getBoundingClientRect();
-      const last = placed[placed.length - 1];
-      const right = view.x + Math.max(...placed.map((p) => p.w)) * view.zoom;
-      const bottom = view.y + (last.y + last.h) * view.zoom;
-      if (right > 40 && bottom > 40 && view.x < width - 40 && view.y < height - 40) return;
+      const left = view.x + b.x * view.zoom;
+      const top = view.y + b.y * view.zoom;
+      const right = left + b.w * view.zoom;
+      const bottom = top + b.h * view.zoom;
+      if (right > 40 && bottom > 40 && left < width - 40 && top < height - 40) return;
     }
     fitted.current = true;
     fit();
-    // Only once, when the lanes are first there.
-  }, [box, placed.length > 0]);
+    // Only once, when there is something to show.
+  }, [box, basePlaced.length + tiles.length > 0]);
 
   useEffect(() => {
     const t = setTimeout(() => saveView(root, view), 400);
     return () => clearTimeout(t);
   }, [root, view]);
-
-  useEffect(() => {
-    if (!box) return;
-    const observer = new ResizeObserver(() => setSize({ w: box.clientWidth, h: box.clientHeight }));
-    observer.observe(box);
-    return () => observer.disconnect();
-  }, [box]);
 
   const zoomAt = useCallback((cx: number, cy: number, factor: number) => {
     setView((v) => {
@@ -263,10 +417,21 @@ export function BlueprintTab({
     [box, zoomAt],
   );
 
+  /** A point on the screen, on the canvas. */
+  const toCanvas = useCallback(
+    (clientX: number, clientY: number): Point => {
+      const r = box?.getBoundingClientRect() ?? { left: 0, top: 0 };
+      return { x: (clientX - r.left - view.x) / view.zoom, y: (clientY - r.top - view.y) / view.zoom };
+    },
+    [box, view],
+  );
+
   // The wheel scrolls (with Shift, sideways); Ctrl + wheel or a pinch zooms.
   useEffect(() => {
     if (!box) return;
     const onWheel = (e: WheelEvent) => {
+      const area = (e.target as HTMLElement).closest("textarea");
+      if (area && area.scrollHeight > area.clientHeight && !e.ctrlKey) return;
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? box.clientHeight : 1;
       if (e.ctrlKey) {
@@ -281,6 +446,256 @@ export function BlueprintTab({
     box.addEventListener("wheel", onWheel, { passive: false });
     return () => box.removeEventListener("wheel", onWheel);
   }, [box, zoomAt]);
+
+  function onPointerDown(e: React.PointerEvent) {
+    suppressClick.current = false;
+    if (e.button !== 0 && e.button !== 1) return;
+    if ((e.target as HTMLElement).closest("button, input, textarea, select, a")) return;
+    // The middle button pans too, instead of scrolling by itself.
+    if (e.button === 1) e.preventDefault();
+    pan.current = { x: e.clientX, y: e.clientY, origin: view, moved: false };
+  }
+
+  function onPointerMove(e: React.PointerEvent) {
+    const p = pan.current;
+    if (!p) return;
+    const dx = e.clientX - p.x;
+    const dy = e.clientY - p.y;
+    if (!p.moved) {
+      // Capture only once it is a drag, so clicks still reach what was clicked.
+      if (Math.abs(dx) + Math.abs(dy) <= 4) return;
+      p.moved = true;
+      suppressClick.current = true;
+      noSelecting(true);
+      setPanning(true);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    setView({ ...p.origin, x: p.origin.x + dx, y: p.origin.y + dy });
+  }
+
+  function onPointerUp(e: React.PointerEvent) {
+    const p = pan.current;
+    pan.current = null;
+    if (p?.moved) noSelecting(false);
+    setPanning(false);
+    // A click on the empty canvas lets go of what was selected.
+    if (p && !p.moved && !(e.target as HTMLElement).closest(".bp-node, .bp-lane-title, .bp-group-title")) {
+      setSelected(null);
+      setSelectedTile(null);
+    }
+  }
+
+  // ---- saving where things lie --------------------------------------------------
+
+  function saveSetting(key: string, value: unknown) {
+    localEdit.current = Date.now();
+    api.setSharedSetting(root, key, JSON.stringify(value)).catch((e) => toast(errorText(e), "error"));
+  }
+
+  function saveLayout(next: Layout) {
+    setLayout(next);
+    saveSetting(LAYOUT_KEY, next);
+  }
+
+  /** The tiles as last changed, also by a change not drawn yet. */
+  const tilesNow = useRef(tiles);
+  tilesNow.current = tiles;
+  function saveTiles(next: Tile[]) {
+    setTiles(next);
+    tilesNow.current = next;
+    saveSetting(TILES_KEY, next);
+  }
+
+  /** The layout with every lane fixed where it is now: once arranged by hand, songs stay put. */
+  function pinAll(move?: { lanes: string[]; by: Point }): Layout {
+    const lanes: Layout["lanes"] = {};
+    for (const p of basePlaced) {
+      const by = move?.lanes.includes(p.lane.path) ? move.by : { x: 0, y: 0 };
+      lanes[p.lane.path] = [snap(p.origin.x + by.x), snap(p.origin.y + by.y)];
+    }
+    // Songs not shown now (removed ones) keep their places.
+    for (const [path, at] of Object.entries(layout.lanes)) {
+      if (!basePlaced.some((p) => p.lane.names.includes(path))) lanes[path] = at;
+    }
+    return { lanes, nodes: layout.nodes };
+  }
+
+  /** Back to songs one under another in order of where they are now; tiles stay. */
+  async function arrange() {
+    const ok = await ask("Разложить песни заново, одну под другой? Заметки, заготовки и рамки останутся на местах.", {
+      title: "Упорядочить песни",
+      okLabel: "Упорядочить",
+      cancelLabel: "Отмена",
+    });
+    if (!ok) return;
+    const sorted = [...basePlaced].sort((a, b) => a.origin.y - b.origin.y || a.origin.x - b.origin.x);
+    const paths = sorted.map((p) => p.lane.path);
+    const rest = order.filter((p) => !paths.includes(p));
+    setOrder([...paths, ...rest]);
+    saveSetting(ORDER_KEY, [...paths, ...rest]);
+    saveLayout({ lanes: {}, nodes: {} });
+    fitted.current = false;
+    requestAnimationFrame(() => fit());
+  }
+
+  const finish = useRef<(d: Drag) => void>(() => {});
+  finish.current = (d: Drag) => {
+    if (d.kind === "node") {
+      const p = basePlaced.find((x) => x.lane.path === d.lane);
+      if (!p) return;
+      if (d.branch) {
+        const n = p.lane.nodes.find((x) => nodeKey(x) === d.key);
+        if (n?.kind === "version") moveToBranch(p.lane, n, d.branch);
+        return;
+      }
+      const was = p.at.get(d.key)!;
+      const next = pinAll();
+      const own = { ...(p.lane.names.map((n) => layout.nodes[n]).find((m) => m !== undefined) ?? {}) };
+      own[d.key] = [snap(was.x + d.by.x), snap(was.y + d.by.y)];
+      const nodes = { ...next.nodes };
+      for (const n of p.lane.names) delete nodes[n];
+      nodes[p.lane.path] = own;
+      saveLayout({ ...next, nodes });
+    } else if (d.kind === "lane") {
+      saveLayout(pinAll({ lanes: [d.lane], by: d.by }));
+    } else if (d.kind === "tile") {
+      const ids = [d.id, ...d.tiles];
+      saveTiles(tiles.map((t) => (ids.includes(t.id) ? { ...t, x: snap(t.x + d.by.x), y: snap(t.y + d.by.y) } : t)));
+      if (d.lanes.length) saveLayout(pinAll({ lanes: d.lanes, by: d.by }));
+    } else {
+      saveTiles(
+        tiles.map((t) =>
+          t.id === d.id
+            ? { ...t, w: Math.max(TILE_MIN.w, snap(t.w + d.by.x)), h: Math.max(TILE_MIN.h, snap(t.h + d.by.y)) }
+            : t,
+        ),
+      );
+    }
+  };
+
+  /** Drags something on the canvas; a press without moving stays a click. */
+  function beginDrag(e: React.PointerEvent, make: (by: Point, ev: PointerEvent) => Drag) {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button, input, textarea, select, a")) return;
+    e.stopPropagation();
+    suppressClick.current = false;
+    const start = { x: e.clientX, y: e.clientY };
+    const zoom = view.zoom;
+    let last: Drag | null = null;
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - start.x;
+      const dy = ev.clientY - start.y;
+      if (!last && Math.abs(dx) + Math.abs(dy) <= 4) return;
+      if (!last) noSelecting(true);
+      suppressClick.current = true;
+      last = make({ x: dx / zoom, y: dy / zoom }, ev);
+      setDrag(last);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      noSelecting(false);
+      setDrag(null);
+      if (last) finish.current(last);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  function dragNode(e: React.PointerEvent, lane: Lane, key: string) {
+    const n = lane.nodes.find((x) => nodeKey(x) === key);
+    const movable = n?.kind === "version" && n.owner !== null && n.change !== "deleted" && !n.pruned;
+    beginDrag(e, (by, ev) => {
+      // Over a branch of the bar that shows up: the version goes there.
+      const target = movable
+        ? document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>("[data-branch]")
+        : null;
+      return { kind: "node", lane: lane.path, key, by, branch: target?.dataset.branch ?? null };
+    });
+  }
+
+  function dragLane(e: React.PointerEvent, lane: Lane) {
+    beginDrag(e, (by) => ({ kind: "lane", lane: lane.path, by }));
+  }
+
+  function dragTile(e: React.PointerEvent, tile: Tile) {
+    // A frame takes along what lies inside it.
+    const lanesIn = tile.kind === "frame" ? basePlaced.filter((p) => inside(laneRect(p), tile)).map((p) => p.lane.path) : [];
+    const tilesIn =
+      tile.kind === "frame" ? tiles.filter((t) => t.id !== tile.id && inside(t, tile)).map((t) => t.id) : [];
+    setSelectedTile(tile.id);
+    beginDrag(e, (by) => ({ kind: "tile", id: tile.id, by, lanes: lanesIn, tiles: tilesIn }));
+  }
+
+  function sizeTile(e: React.PointerEvent, tile: Tile) {
+    beginDrag(e, (by) => ({ kind: "size", id: tile.id, by }));
+  }
+
+  // ---- tiles --------------------------------------------------------------------
+
+  function addTile(kind: Tile["kind"], at: Point) {
+    const tile: Tile = { id: newId(), kind, x: snap(at.x), y: snap(at.y), text: "", ...TILE_NEW[kind] };
+    // A frame goes under what is there; the rest on top.
+    saveTiles(kind === "frame" ? [tile, ...tiles] : [...tiles, tile]);
+    setSelectedTile(tile.id);
+    setEditing(tile.id);
+  }
+
+  function updateTile(id: string, change: Partial<Tile>) {
+    saveTiles(tilesNow.current.map((t) => (t.id === id ? { ...t, ...change } : t)));
+  }
+
+  async function removeTile(tile: Tile) {
+    if (tile.text.trim()) {
+      const ok = await ask(`Удалить «${tile.title}» вместе с текстом?`, {
+        title: "Удалить с полотна",
+        kind: "warning",
+        okLabel: "Удалить",
+        cancelLabel: "Отмена",
+      });
+      if (!ok) return;
+    }
+    saveTiles(tilesNow.current.filter((t) => t.id !== tile.id));
+    setSelectedTile(null);
+  }
+
+  /** A song to come gets its file: it becomes a song of the project, where the tile was. */
+  async function fillTile(tile: Tile, source?: string) {
+    const file = source ?? (await open({ multiple: false, title: `Файл для «${tile.title}»` }));
+    if (typeof file !== "string") return;
+    try {
+      const result = await api.importFiles(root, [file], { save: true, message: tile.title.trim() || null });
+      const path = result.paths[0];
+      if (!path) return;
+      const next = pinAll();
+      next.lanes[path] = [tile.x, tile.y];
+      saveLayout(next);
+      // Its notes stay, as a note just above.
+      const rest = tilesNow.current.filter((t) => t.id !== tile.id);
+      saveTiles(
+        tile.text.trim()
+          ? [...rest, { ...tile, ...TILE_NEW.note, id: newId(), kind: "note", title: tile.title, y: tile.y - 176 }]
+          : rest,
+      );
+      toast(`«${baseName(path)}» добавлен в проект`, "ok");
+      onChanged();
+    } catch (e) {
+      toast(errorText(e), "error");
+    }
+  }
+
+  // Delete removes the selected tile.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" || !selectedTile || editing) return;
+      if ((e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
+      const tile = tiles.find((t) => t.id === selectedTile);
+      if (tile) removeTile(tile);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   // F shows everything, + and − zoom, 0 returns to 100%.
   useEffect(() => {
@@ -299,119 +714,6 @@ export function BlueprintTab({
     return () => window.removeEventListener("keydown", onKey);
   }, [box, fit, zoomBy, view.zoom]);
 
-  function onPointerDown(e: React.PointerEvent) {
-    if (e.button !== 0 && e.button !== 1) return;
-    if ((e.target as HTMLElement).closest("button, input, textarea, select, a")) return;
-    // The middle button pans too, instead of scrolling by itself.
-    if (e.button === 1) e.preventDefault();
-    panned.current = false;
-    pan.current = { x: e.clientX, y: e.clientY, origin: view, moved: false };
-  }
-
-  function onPointerMove(e: React.PointerEvent) {
-    const p = pan.current;
-    if (!p) return;
-    const dx = e.clientX - p.x;
-    const dy = e.clientY - p.y;
-    if (!p.moved) {
-      // Capture only once it is a drag, so clicks still reach the nodes.
-      if (Math.abs(dx) + Math.abs(dy) <= 4) return;
-      p.moved = true;
-      panned.current = true;
-      setPanning(true);
-      e.currentTarget.setPointerCapture(e.pointerId);
-    }
-    setView({ ...p.origin, x: p.origin.x + dx, y: p.origin.y + dy });
-  }
-
-  function onPointerUp(e: React.PointerEvent) {
-    const p = pan.current;
-    pan.current = null;
-    setPanning(false);
-    // A click on the empty canvas closes the panel.
-    if (p && !p.moved && !(e.target as HTMLElement).closest(".bp-node, .bp-tagline")) setSelected(null);
-  }
-
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("blur", close);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("blur", close);
-    };
-  }, [menu]);
-
-  const select = useCallback((path: string, key: string | null, draft = false) => {
-    setSelected((s) => ({ path, key, draft, n: (s?.n ?? 0) + 1 }));
-  }, []);
-
-  // ---- song order ---------------------------------------------------------------
-
-  function saveOrder(paths: string[]) {
-    setOrder(paths);
-    api.setSharedSetting(root, ORDER_KEY, JSON.stringify(paths)).catch((e) => toast(errorText(e), "error"));
-  }
-
-  /** Puts a song before the lane now at `to` (an index into all lanes). */
-  function move(path: string, to: number) {
-    if (!lanes) return;
-    const all = lanes.map((l) => l.path);
-    const from = all.indexOf(path);
-    const next = all.filter((p) => p !== path);
-    next.splice(to > from ? to - 1 : to, 0, path);
-    if (next.some((p, i) => p !== all[i])) saveOrder(next);
-  }
-
-  /** Lanes a song can move among: songs move within their group. */
-  function groupRange(lane: Lane): [number, number] {
-    const g = laneGroup(lane);
-    const all = lanes ?? [];
-    return [all.findIndex((l) => laneGroup(l) === g), all.length - [...all].reverse().findIndex((l) => laneGroup(l) === g)];
-  }
-
-  /** Dragging a song's title moves its lane up or down; a click selects the song. */
-  function startReorder(e: React.PointerEvent, lane: Lane) {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("button") || !box) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
-    const [lo, hi] = groupRange(lane);
-    const startY = e.clientY;
-    const { zoom } = view;
-    const top = box.getBoundingClientRect().top + view.y;
-    let target: number | null = null;
-    const onMove = (ev: PointerEvent) => {
-      const dy = ev.clientY - startY;
-      if (target === null && Math.abs(dy) < 5) return;
-      let to = placed.length;
-      for (let i = 0; i < placed.length; i++) {
-        if (ev.clientY < top + (placed[i].y + placed[i].h / 2) * zoom) {
-          to = i;
-          break;
-        }
-      }
-      target = Math.min(Math.max(to, lo), hi);
-      setReorder({ path: lane.path, to: target, dy: dy / zoom });
-    };
-    const onUp = () => {
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
-      handle.removeEventListener("pointercancel", onUp);
-      setReorder(null);
-      if (target === null) select(lane.path, null);
-      else move(lane.path, target);
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
-    handle.addEventListener("pointercancel", onUp);
-  }
-
   // ---- actions ------------------------------------------------------------------
 
   const versionTrack = (n: SongVersion): Track => ({
@@ -426,6 +728,35 @@ export function BlueprintTab({
     try {
       await api.switchBranch(root, name);
       toast(`Вы на ветке «${name}»`, "ok");
+      onChanged();
+    } catch (e) {
+      toast(errorText(e), "error");
+    }
+  }
+
+  /** The version goes to branch `to`; the branch it is drawn on saves its removal. */
+  async function moveToBranch(lane: Lane, n: SongVersion, to: string) {
+    const from = n.owner;
+    if (!from || from === to) return;
+    const name = splitPath(lane.path).name;
+    const fromPath = lane.tipPaths[from] ?? null;
+    if (from === overview.branch && fromPath) {
+      const ok = await ask(
+        `«${name}» перенесётся в ветку «${to}» и уйдёт из папки проекта. В истории ветки «${from}» он останется.`,
+        { title: "Перенести в другую ветку?", kind: "warning", okLabel: "Перенести", cancelLabel: "Отмена" },
+      );
+      if (!ok) return;
+    }
+    try {
+      await api.moveVersion(root, {
+        rev: n.version.id,
+        path: n.path,
+        to,
+        toPath: lane.tipPaths[to] ?? n.path,
+        from,
+        fromPath,
+      });
+      toast(`«${name}» перенесён из ветки «${from}» в «${to}»`, "ok");
       onChanged();
     } catch (e) {
       toast(errorText(e), "error");
@@ -507,14 +838,19 @@ export function BlueprintTab({
       {
         label: "Новая ветка отсюда…",
         icon: "branch",
-        run: () => setPrompt({ kind: "branch", rev: n.version.id, label: `версии ${short(n.version.id)}` }),
+        run: () => setBranching({ from: { rev: n.version.id, label: `версии ${short(n.version.id)}` }, song: lane.path }),
       },
       {
         label: "Отметить версию…",
         icon: "tag",
-        run: () => setPrompt({ kind: "tag", rev: n.version.id, label: `версии ${short(n.version.id)}` }),
+        run: () => setTagging({ rev: n.version.id, label: `версии ${short(n.version.id)}` }),
       },
     );
+    if (usable && n.owner) {
+      for (const b of overview.branches.filter((b) => b.head && b.name !== n.owner)) {
+        items.push({ label: `Перенести в ветку «${b.name}»`, icon: "branch", run: () => moveToBranch(lane, n, b.name) });
+      }
+    }
     for (const b of n.branches.filter((b) => !b.current)) {
       items.push(
         { label: `Перейти на ветку «${b.name}»`, icon: "check", run: () => switchTo(b.name) },
@@ -543,7 +879,7 @@ export function BlueprintTab({
     }
     if (w.status === "modified") items.push({ label: "Отменить изменения", icon: "undo", run: () => actions.discard(w.path) });
     if (w.status === "deleted") items.push({ label: "Вернуть файл", icon: "restore", run: () => actions.restore(w.path, "HEAD") });
-    const oldName = files?.find((f) => f.path === w.path)?.from;
+    const oldName = fileByPath.get(w.path)?.from;
     if (w.status === "renamed" && oldName) {
       items.push({
         label: "Вернуть старое имя",
@@ -556,9 +892,6 @@ export function BlueprintTab({
   }
 
   function laneMenu(lane: Lane): MenuItem[] {
-    const all = lanes ?? [];
-    const i = all.indexOf(lane);
-    const [lo, hi] = groupRange(lane);
     const items: MenuItem[] = [];
     if (lane.status !== "elsewhere") {
       items.push({ label: "Открыть во вкладке «Файлы»", icon: "doc", run: () => onOpenFile(lane.path) });
@@ -567,7 +900,10 @@ export function BlueprintTab({
       const gone = removed.find((r) => r.path === lane.path);
       if (gone) items.push({ label: "Вернуть в проект", icon: "restore", run: () => actions.restore(lane.path, gone.last) });
     } else if (lane.status !== "elsewhere") {
-      items.push({ label: "Загрузить новую версию…", icon: "download", run: () => onUploadVersion(lane.path) });
+      items.push(
+        { label: "Загрузить новую версию…", icon: "download", run: () => onUploadVersion(lane.path) },
+        { label: "Другой вариант в новой ветке…", icon: "branch", run: () => setBranching({ song: lane.path }) },
+      );
     }
     if (lane.status !== "deleted" && lane.status !== "removed" && lane.status !== "elsewhere") {
       items.push(
@@ -575,62 +911,67 @@ export function BlueprintTab({
         { label: "Показать в папке", icon: "folder", run: () => reveal(lane.path) },
       );
     }
-    if (i > lo) {
-      items.push(
-        { label: "Переместить выше", icon: "up", run: () => move(lane.path, i - 1) },
-        { label: "Переместить в начало", icon: "up", run: () => move(lane.path, lo) },
-      );
-    }
-    if (i < hi - 1) {
-      items.push(
-        { label: "Переместить ниже", icon: "down", run: () => move(lane.path, i + 2) },
-        { label: "Переместить в конец", icon: "down", run: () => move(lane.path, hi) },
-      );
-    }
     return items;
   }
 
-  const canvasMenu: MenuItem[] = [
-    { label: "Добавить песни (файлы)…", icon: "plus", run: () => onAddFiles("files") },
-    { label: "Добавить папку…", icon: "folder", run: () => onAddFiles("folder") },
-    { label: "Показать всё", icon: "wave", run: fit },
-  ];
+  function tileMenu(tile: Tile): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (tile.kind === "song") items.push({ label: "Выбрать файл…", icon: "folder", run: () => fillTile(tile) });
+    items.push({ label: "Изменить", icon: "edit", run: () => setEditing(tile.id) });
+    for (const [name, hue] of COLORS) {
+      if (hue !== tile.color) items.push({ label: `Цвет: ${name.toLowerCase()}`, icon: "label", run: () => updateTile(tile.id, { color: hue }) });
+    }
+    items.push({ label: "Удалить", icon: "trash", run: () => removeTile(tile), danger: true });
+    return items;
+  }
 
-  const laneActions = useRef<LaneActions>(null!);
-  laneActions.current = {
+  function canvasMenu(at: Point): MenuItem[] {
+    const items: MenuItem[] = [
+      { label: "Заметка", icon: "comment", run: () => addTile("note", at) },
+      { label: "Заготовка песни", icon: "wave", run: () => addTile("song", at) },
+      { label: "Рамка для группы", icon: "archive", run: () => addTile("frame", at) },
+      { label: "Добавить песни (файлы)…", icon: "plus", run: () => onAddFiles("files") },
+      { label: "Добавить папку…", icon: "folder", run: () => onAddFiles("folder") },
+    ];
+    if (overview.head) items.push({ label: "Новая ветка…", icon: "branch", run: () => setBranching({}) });
+    items.push({ label: "Показать всё", icon: "wave", run: fit });
+    if (Object.keys(layout.lanes).length) items.push({ label: "Упорядочить песни…", icon: "grip", run: arrange });
+    return items;
+  }
+
+  const act = useRef<Actions>(null!);
+  act.current = {
     select,
     songMenu: (e, lane) => openMenu(e, laneMenu(lane)),
     versionMenu: (e, lane, n) => openMenu(e, versionMenu(lane, n)),
     workMenu: (e, lane, n) => openMenu(e, workMenu(lane, n)),
     save: quickSave,
-    reorder: startReorder,
+    dragLane,
+    dragNode,
+    dragTile,
+    sizeTile,
+    selectTile: (id) => {
+      setSelected(null);
+      setSelectedTile(id);
+    },
+    tileMenu: (e, tile) => {
+      setSelectedTile(tile.id);
+      openMenu(e, tileMenu(tile));
+    },
+    editTile: setEditing,
+    updateTile,
+    fillTile,
   };
-
 
   // ---- drawing ------------------------------------------------------------------
 
   if (error) return <div className="center error-text">{error}</div>;
   if (!lanes) return <div className="center muted">Строю схему…</div>;
 
-  if (lanes.length === 0) {
-    return (
-      <div className="center">
-        <Empty icon="wave" title="Здесь появится схема проекта">
-          У каждой песни будет своя дорожка: узел песни, от него проводами — её версии, ответвления для других веток и
-          то, что сейчас лежит в папке.
-          <div className="empty-actions">
-            <button className="btn btn-primary" onClick={() => onAddFiles("files")}>
-              <Icon name="plus" /> Добавить файлы
-            </button>
-          </div>
-        </Empty>
-      </div>
-    );
-  }
-
   const songs = lanes.filter((l) => laneGroup(l) === 0).length;
   const unsaved = lanes.filter((l) => l.nodes.some((n) => n.kind === "work")).length;
   const removedCount = lanes.length - lanes.filter((l) => l.status !== "removed").length;
+  const empty = lanes.length === 0 && tiles.length === 0;
 
   const panelLane = selected ? lanes.find((l) => l.path === selected.path) : undefined;
   const panelNode = panelLane && selected?.key ? panelLane.nodes.find((n) => n.key === selected.key) : undefined;
@@ -648,19 +989,13 @@ export function BlueprintTab({
     backgroundPosition: `${view.x}px ${view.y}px`,
   };
 
-  // Where a song being dragged would land.
-  const from = reorder ? placed.findIndex((p) => p.lane.path === reorder.path) : -1;
-  const last = placed[placed.length - 1];
-  const dropY =
-    reorder && reorder.to !== from && reorder.to !== from + 1
-      ? reorder.to < placed.length
-        ? placed[reorder.to].y - LANE_GAP / 2
-        : last.y + last.h + LANE_GAP / 2
+  // A version being dragged can go to another branch: the branches show up to drop it on.
+  const draggedLane = drag?.kind === "node" ? basePlaced.find((p) => p.lane.path === drag.lane)?.lane : undefined;
+  const draggedNode = drag?.kind === "node" ? draggedLane?.nodes.find((n) => nodeKey(n) === drag.key) : undefined;
+  const dock =
+    draggedNode?.kind === "version" && draggedNode.owner && draggedNode.change !== "deleted" && !draggedNode.pruned
+      ? { node: draggedNode, branches: overview.branches.filter((b) => b.head && b.name !== draggedNode.owner) }
       : null;
-
-  // Once the songs' own nodes are out of sight on the left, their names stay
-  // at the edge of the canvas.
-  const namesAside = view.x + (LANE_PAD + SONG_W) * view.zoom < 40;
 
   return (
     <div className="bp-wrap">
@@ -686,6 +1021,26 @@ export function BlueprintTab({
             <i className="bp-sw sw-other" /> другая ветка
             <i className="bp-sw sw-work" /> не сохранено
           </span>
+          <button
+            className="btn btn-small"
+            onClick={(e) => {
+              const r = box?.getBoundingClientRect();
+              const at = r ? toCanvas(r.left + r.width / 2 - 120, r.top + r.height / 2 - 80) : { x: 0, y: 0 };
+              openMenu(e, [
+                { label: "Заметка", icon: "comment", run: () => addTile("note", at) },
+                { label: "Заготовка песни", icon: "wave", run: () => addTile("song", at) },
+                { label: "Рамка для группы", icon: "archive", run: () => addTile("frame", at) },
+              ]);
+            }}
+            title="Заметка, заготовка песни или рамка — в середину полотна. Или правой кнопкой там, где нужно"
+          >
+            <Icon name="plus" size={14} /> Тайл
+          </button>
+          {Object.keys(layout.lanes).length > 0 && (
+            <button className="btn btn-small" onClick={arrange} title="Разложить песни заново, одну под другой">
+              Упорядочить
+            </button>
+          )}
           <button className="btn btn-small" onClick={fit} title="Показать всю схему (F)">
             Показать всё
           </button>
@@ -694,10 +1049,10 @@ export function BlueprintTab({
             title={
               "Тащите полотно мышью (или средней кнопкой)\n" +
               "Колесо — прокрутка, Shift + колесо — вбок\n" +
-              "Ctrl + колесо — масштаб, 0 — 100%\n" +
-              "F — показать всё\n" +
-              "Заголовок песни тащите вверх или вниз — порядок песен\n" +
-              "Правая кнопка — действия"
+              "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё\n" +
+              "Узлы, заголовки песен, заметки и рамки тащатся куда угодно\n" +
+              "Версию можно бросить на другую ветку — она перенесётся туда\n" +
+              "Правая кнопка — действия, на пустом месте — новые тайлы"
             }
           >
             ?
@@ -717,67 +1072,94 @@ export function BlueprintTab({
 
         <div
           ref={setBox}
-          className={`bp ${panning ? "panning" : ""}`}
+          className={`bp ${panning ? "panning" : ""} ${drag ? "dragging" : ""}`}
           style={gridStyle}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={() => {
             pan.current = null;
+            noSelecting(false);
             setPanning(false);
           }}
           onClickCapture={(e) => {
-            if (panned.current) {
-              panned.current = false;
+            if (suppressClick.current) {
+              suppressClick.current = false;
               e.stopPropagation();
             }
           }}
-          onContextMenu={(e) => openMenu(e, canvasMenu)}
+          onContextMenu={(e) => openMenu(e, canvasMenu(toCanvas(e.clientX, e.clientY)))}
         >
-          <div className="bp-layer" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}>
-            {placed.map(({ lane, y, w, h }) => (
+          <div
+            className="bp-layer"
+            style={{
+              transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
+              ["--tscale" as string]: Math.min(3, Math.max(1, 0.55 / view.zoom)),
+            }}
+          >
+            {shownTiles
+              .filter((t) => t.kind === "frame")
+              .map((t) => (
+                <TileView key={t.id} tile={t} selected={selectedTile === t.id} editing={editing === t.id} act={act} />
+              ))}
+            {placed.map((p) => (
               <LaneView
-                key={lane.path}
+                key={p.lane.path}
                 root={root}
-                lane={lane}
-                y={y}
-                w={w}
-                h={h}
-                file={fileByPath.get(lane.path)}
-                draft={drafts.get(lane.path)}
+                placed={p}
+                file={fileByPath.get(p.lane.path)}
+                draft={drafts.get(p.lane.path)}
                 tagsOf={tagsOf}
-                selectedKey={selected?.path === lane.path ? (selected.key ?? "") : null}
-                lift={reorder?.path === lane.path ? reorder.dy : null}
-                act={laneActions}
+                selectedKey={selected?.path === p.lane.path ? (selected.key ?? "") : null}
+                dragging={
+                  drag?.kind === "node" && drag.lane === p.lane.path
+                    ? drag.key
+                    : drag?.kind === "lane" && drag.lane === p.lane.path
+                      ? ""
+                      : null
+                }
+                act={act}
               />
             ))}
-            {dropY !== null && (
-              <div className="bp-drop" style={{ top: dropY, width: Math.max(...placed.map((p) => p.w)) }} />
-            )}
+            {shownTiles
+              .filter((t) => t.kind !== "frame")
+              .map((t) => (
+                <TileView key={t.id} tile={t} selected={selectedTile === t.id} editing={editing === t.id} act={act} />
+              ))}
           </div>
 
-          {namesAside &&
-            placed.map(({ lane, y, h }) => {
-              const top = view.y + y * view.zoom;
-              const bottom = top + h * view.zoom;
-              if (bottom < 36 || top > size.h) return null;
-              return (
-                <button
-                  key={lane.path}
-                  className={`bp-tagline ${selected?.path === lane.path ? "selected" : ""}`}
-                  style={{ top: Math.min(Math.max(top + 6, 8), bottom - 32), ["--hue" as string]: songHue(lane.path) }}
-                  onClick={() => {
-                    select(lane.path, null);
-                    setView((v) => ({ ...v, x: 32 }));
-                  }}
-                  onContextMenu={(e) => openMenu(e, laneMenu(lane))}
-                  title="Показать начало дорожки"
+          {empty && (
+            <div className="bp-empty">
+              <Empty icon="wave" title="Здесь появится схема проекта">
+                У каждой песни будет своя дорожка: узел песни, от него проводами — её версии, ответвления для других
+                веток и то, что сейчас лежит в папке. Правой кнопкой по полотну — заметки, заготовки песен и рамки.
+                <div className="empty-actions">
+                  <button className="btn btn-primary" onClick={() => onAddFiles("files")}>
+                    <Icon name="plus" /> Добавить файлы
+                  </button>
+                </div>
+              </Empty>
+            </div>
+          )}
+
+          {dock && (
+            <div className="bp-dock">
+              <span className="bp-dock-title">
+                Перенести «{splitPath(dock.node.path).name}» из ветки «{dock.node.owner}» в:
+              </span>
+              {dock.branches.length === 0 && <span className="muted">других веток нет — создайте ветку</span>}
+              {dock.branches.map((b) => (
+                <span
+                  key={b.name}
+                  data-branch={b.name}
+                  className={`bp-dock-branch ${drag?.kind === "node" && drag.branch === b.name ? "over" : ""}`}
                 >
-                  <span className="bp-event" />
-                  <span>{splitPath(lane.path).name}</span>
-                </button>
-              );
-            })}
+                  <Icon name="branch" size={13} /> {b.name}
+                  {b.current && <span className="muted"> · текущая</span>}
+                </span>
+              ))}
+            </div>
+          )}
 
           <div className="bp-watermark">СХЕМА</div>
         </div>
@@ -788,15 +1170,14 @@ export function BlueprintTab({
           className="popover bp-menu"
           style={{
             left: Math.min(menu.x, window.innerWidth - 276),
-            top: Math.min(menu.y, window.innerHeight - menu.items.length * 36 - 20),
+            top: Math.max(8, Math.min(menu.y, window.innerHeight - menu.items.length * 36 - 20)),
           }}
-          onPointerDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
         >
           {menu.items.map((item) => (
             <button
               key={item.label}
-              className="popover-main"
+              className={`popover-main ${item.danger ? "danger-text" : ""}`}
               onClick={() => {
                 setMenu(null);
                 item.run();
@@ -839,23 +1220,27 @@ export function BlueprintTab({
         </aside>
       )}
 
-      {prompt && (
+      {tagging && (
         <PromptDialog
-          title={prompt.kind === "branch" ? "Новая ветка" : "Отметить версию"}
-          label={prompt.kind === "branch" ? "Название ветки" : "Название метки"}
-          placeholder={prompt.kind === "branch" ? "Например: acoustic" : "Например: master-v1"}
-          confirm={prompt.kind === "branch" ? "Создать и перейти" : "Отметить"}
-          hint={
-            prompt.kind === "branch"
-              ? `Ветка начнётся с ${prompt.label}. Если это не текущая версия, файлы в папке заменятся.`
-              : `Метка навсегда привязана к ${prompt.label}.`
-          }
+          title="Отметить версию"
+          label="Название метки"
+          placeholder="Например: master-v1"
+          confirm="Отметить"
+          hint={`Метка навсегда привязана к ${tagging.label}.`}
           onSubmit={async (name) => {
-            if (prompt.kind === "branch") await api.createBranch(root, name, prompt.rev, true);
-            else await api.createTag(root, name, prompt.rev);
+            await api.createTag(root, name, tagging.rev);
             onChanged();
           }}
-          onClose={() => setPrompt(null)}
+          onClose={() => setTagging(null)}
+        />
+      )}
+      {branching && (
+        <BranchDialog
+          overview={overview}
+          from={branching.from}
+          song={branching.song}
+          onClose={() => setBranching(null)}
+          onCreated={onChanged}
         />
       )}
       {renaming && (
@@ -901,43 +1286,40 @@ function ExecPin({ side, on }: { side: "in" | "out"; on: boolean }) {
 const parentsOf = (n: LaneNode) => (n.kind === "work" ? (n.parent ? [n.parent] : []) : n.parents);
 
 /**
- * One song: its own node, then its versions and the file on disk, wired.
- * Drawn again only when the song changes, not while the canvas moves.
+ * One song: a frame with its title, the song's own node, then its versions
+ * and the file on disk, wired. Drawn again only when the song changes, not
+ * while the canvas moves.
  */
 const LaneView = memo(function LaneView({
   root,
-  lane,
-  y,
-  w,
-  h,
+  placed,
   file,
   draft,
   tagsOf,
   selectedKey,
-  lift,
+  dragging,
   act,
 }: {
   root: string;
-  lane: Lane;
-  y: number;
-  w: number;
-  h: number;
+  placed: PlacedLane;
   file: ProjectFile | undefined;
   /** The description written for the file's next version. */
   draft: string;
   tagsOf: Map<string, string[]>;
   /** The selected node in this lane; "" for the song itself, null when the selection is elsewhere. */
   selectedKey: string | null;
-  /** How far the lane is being dragged, in canvas pixels. */
-  lift: number | null;
-  act: React.RefObject<LaneActions>;
+  /** The node being dragged; "" for the whole lane. */
+  dragging: string | null;
+  act: React.RefObject<Actions>;
 }) {
+  const { lane, origin, at, frame } = placed;
   const { dir, name } = splitPath(lane.path);
   const kind = previewKind(lane.path);
   const icon: IconName = kind === "audio" ? "wave" : kind === "image" ? "image" : "doc";
   const keys = new Set(lane.nodes.map((n) => n.key));
   const fed = new Set(lane.nodes.flatMap(parentsOf));
   const starts = lane.nodes.filter((n) => !parentsOf(n).some((p) => keys.has(p)));
+  const muted = lane.status === "removed" || lane.status === "elsewhere";
 
   const versionTrack = (n: SongVersion): Track => ({
     root,
@@ -947,12 +1329,26 @@ const LaneView = memo(function LaneView({
   });
   const nowTrack: Track = { root, rev: null, path: lane.path, label: "Сейчас на диске (не сохранено)" };
 
-  const songOut = { x: LANE_PAD + SONG_W - 6, y: LANE_PAD + PIN_Y };
-  const pinIn = (n: LaneNode) => ({ x: nodeX(n.col) + 6, y: nodeY(n.row) + PIN_Y });
-  const pinOut = (n: LaneNode) => ({ x: nodeX(n.col) + NODE_W - 6, y: nodeY(n.row) + PIN_Y });
+  // Places within the frame.
+  const pos = (key: string) => {
+    const p = at.get(key)!;
+    return { x: p.x - frame.x, y: p.y - frame.y };
+  };
+  const pinOut = (key: string) => {
+    const p = pos(key);
+    return { x: p.x + (key === SONG_KEY ? SONG_W : NODE_W) - 6, y: p.y + PIN_Y };
+  };
+  const pinIn = (key: string) => {
+    const p = pos(key);
+    return { x: p.x + 6, y: p.y + PIN_Y };
+  };
+  const byKey = new Map(lane.nodes.map((n) => [n.key, n]));
   const wireClass = (n: LaneNode) =>
     `bp-wire ${n.kind === "work" ? "work" : ""} ${n.kind === "version" && !n.onCurrent ? "elsewhere" : ""}`;
-  const muted = lane.status === "removed" || lane.status === "elsewhere";
+  const nodeStyle = (key: string, w: number) => {
+    const p = pos(key);
+    return { left: p.x, top: p.y, width: w, height: NODE_H };
+  };
 
   return (
     <div
@@ -960,37 +1356,54 @@ const LaneView = memo(function LaneView({
         "bp-lane",
         `lane-${lane.status}`,
         selectedKey !== null ? "selected" : "",
-        lift !== null ? "lifted" : "",
+        dragging === "" ? "lifted" : "",
       ].join(" ")}
-      style={{ top: y + (lift ?? 0), width: w, height: h, ["--hue" as string]: songHue(lane.path) }}
+      style={{
+        left: origin.x + frame.x,
+        top: origin.y + frame.y,
+        width: frame.w,
+        height: frame.h,
+        ["--hue" as string]: songHue(lane.path),
+      }}
     >
-      <svg className="bp-wires" width={w} height={h}>
+      <div
+        className="bp-lane-title"
+        onPointerDown={(e) => act.current.dragLane(e, lane)}
+        onClick={() => act.current.select(lane.path, null)}
+        onContextMenu={(e) => act.current.songMenu(e, lane)}
+        title={`${lane.path}\nТащите, чтобы передвинуть песню целиком`}
+      >
+        <span className="bp-lane-name">
+          {name}
+          <span className="bp-lane-meta">{laneText(lane)}</span>
+        </span>
+      </div>
+
+      <svg className="bp-wires" width={frame.w} height={frame.h}>
         {starts.map((n) => {
-          const to = pinIn(n);
-          return <path key={`song>${n.key}`} d={wire(songOut.x, songOut.y, to.x, to.y)} className={wireClass(n)} />;
+          const a = pinOut(SONG_KEY);
+          const b = pinIn(nodeKey(n));
+          return <path key={`song>${n.key}`} d={wire(a.x, a.y, b.x, b.y)} className={wireClass(n)} />;
         })}
         {lane.nodes.flatMap((n) =>
           parentsOf(n).map((p) => {
-            const parent = lane.nodes.find((x) => x.key === p);
+            const parent = byKey.get(p);
             if (!parent) return null;
-            const a = pinOut(parent);
-            const b = pinIn(n);
+            const a = pinOut(nodeKey(parent));
+            const b = pinIn(nodeKey(n));
             return <path key={`${p}>${n.key}`} d={wire(a.x, a.y, b.x, b.y)} className={wireClass(n)} />;
           }),
         )}
       </svg>
 
       <div
-        className={`bp-node bp-song ${muted ? "muted" : ""} ${selectedKey === "" ? "selected" : ""}`}
-        style={{ left: LANE_PAD, top: LANE_PAD, width: SONG_W, height: NODE_H }}
+        className={`bp-node bp-song ${muted ? "muted" : ""} ${selectedKey === "" ? "selected" : ""} ${dragging === SONG_KEY ? "dragging" : ""}`}
+        style={nodeStyle(SONG_KEY, SONG_W)}
+        onPointerDown={(e) => act.current.dragNode(e, lane, SONG_KEY)}
         onClick={() => act.current.select(lane.path, null)}
         onContextMenu={(e) => act.current.songMenu(e, lane)}
       >
-        <div
-          className="bp-node-head"
-          onPointerDown={(e) => act.current.reorder(e, lane)}
-          title={`${lane.path}\nПеретащите вверх или вниз, чтобы поменять порядок песен (он общий для всех устройств)`}
-        >
+        <div className="bp-node-head" title={lane.path}>
           <span className="bp-event" />
           <span className="bp-title">{name}</span>
           <button
@@ -1016,15 +1429,20 @@ const LaneView = memo(function LaneView({
       </div>
 
       {lane.nodes.map((n) => {
-        const style = { left: nodeX(n.col), top: nodeY(n.row), width: NODE_W, height: NODE_H };
+        const key = nodeKey(n);
+        const style = nodeStyle(key, NODE_W);
         const isSelected = selectedKey === n.key;
         const prev = previousVersion(lane, n);
+        const common = {
+          style,
+          onPointerDown: (e: React.PointerEvent) => act.current.dragNode(e, lane, key),
+        };
         if (n.kind === "work") {
           return (
             <div
               key={n.key}
-              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""}`}
-              style={style}
+              {...common}
+              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""} ${dragging === key ? "dragging" : ""}`}
               onClick={() => act.current.select(lane.path, n.key, true)}
               onContextMenu={(e) => act.current.workMenu(e, lane, n)}
               title="Файл в папке сейчас: щёлкните, чтобы описать и сохранить"
@@ -1034,7 +1452,7 @@ const LaneView = memo(function LaneView({
                 <span className="bp-title">Сейчас в папке</span>
                 <span className="bp-state">{WORK_WORD[n.status]}</span>
               </div>
-              <ExecPin side="in" on />
+              <ExecPin side="in" on={!!n.parent} />
               <div className="bp-rows">
                 <div className="bp-row bp-msg">
                   <span className="bp-text">
@@ -1076,17 +1494,20 @@ const LaneView = memo(function LaneView({
         return (
           <div
             key={n.key}
+            {...common}
             className={[
               "bp-node bp-version",
               `change-${n.change}`,
               n.onCurrent ? "" : "elsewhere",
               merge ? "merge" : "",
               isSelected ? "selected" : "",
+              dragging === key ? "dragging" : "",
             ].join(" ")}
-            style={style}
             onClick={() => act.current.select(lane.path, n.key)}
             onContextMenu={(e) => act.current.versionMenu(e, lane, n)}
-            title={`${v.message || "без описания"}\n${formatDate(v.createdAt)} · ${v.author} · ${short(v.id)}`}
+            title={`${v.message || "без описания"}\n${formatDate(v.createdAt)} · ${v.author} · ${short(v.id)}${
+              n.owner ? `\nВетка «${n.owner}»: перетащите на другую ветку, чтобы перенести` : ""
+            }`}
           >
             <div className="bp-node-head">
               <Icon name={merge ? "merge" : n.change === "deleted" ? "trash" : icon} size={12} />
@@ -1145,3 +1566,154 @@ const LaneView = memo(function LaneView({
     </div>
   );
 });
+
+/** A note, a song to come or a frame: dragged around, resized, written in. */
+function TileView({
+  tile,
+  selected,
+  editing,
+  act,
+}: {
+  tile: Tile;
+  selected: boolean;
+  editing: boolean;
+  act: React.RefObject<Actions>;
+}) {
+  const el = useRef<HTMLDivElement>(null);
+  const [title, setTitle] = useState(tile.title);
+  const [text, setText] = useState(tile.text);
+
+  useEffect(() => {
+    if (!editing) {
+      setTitle(tile.title);
+      setText(tile.text);
+    }
+  }, [editing, tile.title, tile.text]);
+
+  // A file dropped on a song to come from the file manager becomes that song.
+  useEffect(() => {
+    const node = el.current;
+    if (!node || tile.kind !== "song") return;
+    const onDrop = (e: Event) => {
+      const [first] = (e as CustomEvent<string[]>).detail;
+      if (first) act.current.fillTile(tile, first);
+    };
+    node.addEventListener("filedrop", onDrop);
+    return () => node.removeEventListener("filedrop", onDrop);
+  }, [tile, act]);
+
+  function done() {
+    if (title.trim() !== tile.title || text !== tile.text) {
+      act.current.updateTile(tile.id, { title: title.trim() || tile.title, text });
+    }
+    act.current.editTile(null);
+  }
+
+  const keys = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      setTitle(tile.title);
+      setText(tile.text);
+      act.current.editTile(null);
+    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || (e.target as HTMLElement).tagName === "INPUT")) {
+      e.preventDefault();
+      done();
+    }
+  };
+
+  const titleField = editing ? (
+    <input
+      className="bp-tile-input"
+      autoFocus
+      value={title}
+      onFocus={(e) => e.target.select()}
+      onChange={(e) => setTitle(e.target.value)}
+      onKeyDown={keys}
+      onBlur={(e) => !el.current?.contains(e.relatedTarget as Node) && done()}
+    />
+  ) : (
+    <span className="bp-title">{tile.title}</span>
+  );
+
+  const common = {
+    ref: el,
+    style: {
+      left: tile.x,
+      top: tile.y,
+      width: tile.w,
+      height: tile.h,
+      ["--hue" as string]: tile.color,
+    },
+    onClick: (e: React.MouseEvent) => {
+      e.stopPropagation();
+      act.current.selectTile(tile.id);
+    },
+    onDoubleClick: () => act.current.editTile(tile.id),
+    onContextMenu: (e: React.MouseEvent) => act.current.tileMenu(e, tile),
+  };
+  const resize = <span className="bp-resize" onPointerDown={(e) => act.current.sizeTile(e, tile)} />;
+
+  if (tile.kind === "frame") {
+    return (
+      <div {...common} className={`bp-group ${selected ? "selected" : ""}`}>
+        <div className="bp-group-title" onPointerDown={(e) => act.current.dragTile(e, tile)}>
+          {titleField}
+        </div>
+        {resize}
+      </div>
+    );
+  }
+
+  const body = editing ? (
+    <textarea
+      className="bp-tile-text"
+      value={text}
+      placeholder={tile.kind === "song" ? "Идея, текст, что записать…" : "Текст заметки"}
+      onChange={(e) => setText(e.target.value)}
+      onKeyDown={keys}
+      onBlur={(e) => !el.current?.contains(e.relatedTarget as Node) && done()}
+    />
+  ) : (
+    <div className="bp-tile-body">{tile.text || <i>{tile.kind === "song" ? "заготовка без файла" : "пусто"}</i>}</div>
+  );
+
+  if (tile.kind === "song") {
+    return (
+      <div
+        {...common}
+        data-file-drop
+        className={`bp-node bp-placeholder ${selected ? "selected" : ""}`}
+        onPointerDown={(e) => act.current.dragTile(e, tile)}
+      >
+        <div className="bp-node-head">
+          <span className="bp-event" />
+          {titleField}
+          <span className="bp-state">заготовка</span>
+        </div>
+        {body}
+        <div className="bp-tile-foot">
+          <button className="btn btn-small" onClick={() => act.current.fillTile(tile)}>
+            <Icon name="folder" size={13} /> Выбрать файл…
+          </button>
+          <span className="muted">или бросьте файл сюда</span>
+        </div>
+        <ExecPin side="out" on={false} />
+        {resize}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      {...common}
+      className={`bp-node bp-note ${selected ? "selected" : ""}`}
+      onPointerDown={(e) => act.current.dragTile(e, tile)}
+    >
+      <div className="bp-node-head">
+        <Icon name="comment" size={12} />
+        {titleField}
+      </div>
+      {body}
+      {resize}
+    </div>
+  );
+}

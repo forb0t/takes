@@ -2367,6 +2367,11 @@ input[type="checkbox"]:disabled {
   opacity: 1;
 }
 
+.no-select,
+.no-select * {
+  user-select: none !important;
+}
+
 /* ---- diagram: a blueprint of songs ------------------------------------------------- */
 
 .bp-wrap {
@@ -2475,7 +2480,8 @@ input[type="checkbox"]:disabled {
   position: relative;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  /* Not even focusing a field at the edge may scroll it: the view moves only by panning. */
+  overflow: clip;
   touch-action: none;
   user-select: none;
   background-color: #232327;
@@ -2497,19 +2503,16 @@ input[type="checkbox"]:disabled {
   transform-origin: 0 0;
 }
 
-/* A song's lane, framed like a comment. */
+/* A song's lane, framed like a comment, its title on top. */
 .bp-lane {
   position: absolute;
-  left: 0;
   border: 1px solid hsl(var(--hue) 45% 62% / 0.25);
-  border-top: 3px solid hsl(var(--hue) 55% 60% / 0.7);
   border-radius: 7px;
   background: hsl(var(--hue) 40% 55% / 0.06);
 }
 
 .bp-lane.selected {
-  border-color: hsl(var(--hue) 55% 65% / 0.55);
-  border-top-color: hsl(var(--hue) 60% 62%);
+  border-color: hsl(var(--hue) 55% 65% / 0.6);
   background: hsl(var(--hue) 40% 55% / 0.1);
 }
 
@@ -2524,15 +2527,216 @@ input[type="checkbox"]:disabled {
   opacity: 0.62;
 }
 
-.bp-drop {
+.bp-lane-title,
+.bp-group-title {
+  display: flex;
+  align-items: flex-end;
+  height: 30px;
+  padding: 0 12px 6px;
+  border-radius: 6px 6px 0 0;
+  background: hsl(var(--hue) 45% 45% / 0.35);
+  cursor: grab;
+}
+
+.bp-lane-title:active,
+.bp-group-title:active {
+  cursor: grabbing;
+}
+
+/* The name grows when zoomed out, to stay readable. */
+.bp-lane-name {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  max-width: 100%;
+  overflow: hidden;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  transform: scale(var(--tscale, 1));
+  transform-origin: left bottom;
+}
+
+.bp-lane-meta {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+/* A frame grouping songs and tiles: under everything, moves what is inside. */
+.bp-group {
   position: absolute;
-  left: 0;
-  z-index: 6;
-  height: 3px;
-  margin-top: -1.5px;
-  border-radius: 2px;
-  background: var(--accent);
-  box-shadow: 0 0 12px var(--accent);
+  border: 1px solid hsl(var(--hue) 50% 60% / 0.4);
+  border-radius: 8px;
+  background: hsl(var(--hue) 40% 50% / 0.08);
+  pointer-events: none;
+}
+
+.bp-group > * {
+  pointer-events: auto;
+}
+
+.bp-group.selected {
+  border-color: var(--accent);
+}
+
+.bp-group-title {
+  height: 34px;
+  align-items: center;
+  padding-bottom: 0;
+  background: hsl(var(--hue) 45% 45% / 0.45);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.bp-group-title .bp-title {
+  transform: scale(var(--tscale, 1));
+  transform-origin: left center;
+}
+
+.bp-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  border-right: 3px solid rgba(255, 255, 255, 0.35);
+  border-bottom: 3px solid rgba(255, 255, 255, 0.35);
+  border-radius: 0 0 8px 0;
+  cursor: nwse-resize;
+}
+
+.bp-resize:hover {
+  border-color: var(--accent);
+}
+
+/* Notes and songs to come. */
+.bp-note {
+  --head: hsl(var(--hue) 60% 38%);
+  cursor: grab;
+}
+
+.bp-placeholder {
+  --head: #6b2722;
+  border: 1px dashed hsl(0 60% 60% / 0.7);
+  cursor: grab;
+}
+
+.bp-placeholder.drop-over {
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.bp-tile-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 12px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bp-tile-body i {
+  color: var(--faint);
+}
+
+.bp-tile-text {
+  flex: 1;
+  min-height: 0;
+  margin: 6px 8px 10px;
+  padding: 6px 8px;
+  resize: none;
+  font-size: 12.5px;
+}
+
+.bp-tile-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font: inherit;
+}
+
+.bp-tile-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 10px;
+  font-size: 11.5px;
+}
+
+/* While dragged, a node lets the pointer find what is under it. */
+.bp-node.dragging {
+  z-index: 10;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.bp.dragging {
+  cursor: grabbing;
+}
+
+/* The branches a dragged version can go to. */
+.bp-dock {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  padding: 10px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: rgba(17, 17, 20, 0.95);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+  font-size: 12.5px;
+  transform: translateX(-50%);
+}
+
+.bp-dock-title {
+  color: var(--muted);
+}
+
+.bp-dock-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 9px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.bp-dock-branch.over {
+  border: 1.5px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.bp-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.bp-empty .empty-actions {
+  pointer-events: auto;
 }
 
 .bp-wires {
@@ -2792,36 +2996,6 @@ input[type="checkbox"]:disabled {
 .bp-tag {
   color: #8fc7ff;
   background: rgba(143, 199, 255, 0.12);
-}
-
-/* A song's name at the edge of the canvas while its node is out of sight. */
-.bp-tagline {
-  position: absolute;
-  left: 10px;
-  z-index: 4;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 240px;
-  padding: 4px 10px 4px 9px;
-  border: 1px solid #060607;
-  border-radius: 7px;
-  background: rgba(17, 17, 20, 0.92);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.bp-tagline span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bp-tagline:hover,
-.bp-tagline.selected {
-  border-color: var(--accent);
 }
 
 .bp-watermark {

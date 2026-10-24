@@ -275,6 +275,14 @@ export const api = {
   switchBranch: (root: string, name: string) => invoke<void>("switch_branch", { root, name }),
   createBranch: (root: string, name: string, from: string | null, switchTo: boolean) =>
     invoke<void>("create_branch", { root, name, from, switchTo }),
+  /** A new branch with a file from outside as its version of `path`; you stay where you are. */
+  branchWithFile: (root: string, name: string, from: string | null, source: string, path: string) =>
+    invoke<string>("branch_with_file", { root, name, from, source, path }),
+  /** Moves a version of a file to another branch; the branch it leaves saves its removal. */
+  moveVersion: (
+    root: string,
+    move: { rev: string; path: string; to: string; toPath: string; from: string; fromPath: string | null },
+  ) => invoke<void>("move_version", { root, ...move }),
   deleteBranch: (root: string, name: string) => invoke<void>("delete_branch", { root, name }),
   createTag: (root: string, name: string, rev: string) => invoke<void>("create_tag", { root, name, rev }),
   deleteTag: (root: string, name: string) => invoke<void>("delete_tag", { root, name }),
@@ -330,7 +338,7 @@ const MESSAGES: Record<string, string> = {
   invalidName: "Недопустимое имя: нельзя использовать ~ ^ : ? * [ \\ и «..».",
   invalidPath: "Недопустимый путь к файлу.",
   overlapsProject:
-    "Это уже папка проекта или папка, в которой лежит сам проект. Файлы проекта добавлять не нужно: Takes их уже видит на вкладке «Изменения».",
+    "Это уже папка проекта или папка, в которой лежит сам проект. Файлы проекта добавлять не нужно: Takes их уже видит на вкладке «Файлы».",
   invalidMeta: "Метка — до 40 символов, тональность — до 12, темп — от 20 до 400 BPM.",
   notText: "Это не текстовый файл.",
   tooLarge: "Файл слишком большой, чтобы показать его здесь.",
@@ -367,6 +375,10 @@ export function errorText(e: unknown): string {
   if (isCommandError(e) && e.kind === "fileChanging") {
     const names = e.paths.map((p) => `«${p.split("/").pop()}»`).join(", ");
     return `Файлы ещё записываются другой программой: ${names}. Дождитесь, пока она закончит, и сохраните снова.`;
+  }
+  if (isCommandError(e) && e.kind === "dirtyWorktree" && e.changes.length > 0 && e.changes.length <= 3) {
+    const names = e.changes.map((c) => `«${c.path.split("/").pop()}»`).join(", ");
+    return `Не сохранены изменения в ${names}. Сохраните версию или отмените изменения.`;
   }
   if (isCommandError(e) && e.kind === "remote") return `Хранилище недоступно: ${e.message}`;
   if (isCommandError(e)) return MESSAGES[e.kind] ?? e.message;

@@ -1,8 +1,9 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, errorText, isCommandError, type Overview } from "../api";
-import { Icon, PromptDialog, useToast } from "../ui";
+import { Icon, useToast } from "../ui";
 import { plural } from "../util";
+import { BranchDialog } from "./BranchDialog";
 import { MergeDialog } from "./MergeDialog";
 
 export function BranchMenu({ overview, onChanged }: { overview: Overview; onChanged: () => void }) {
@@ -109,19 +110,7 @@ export function BranchMenu({ overview, onChanged }: { overview: Overview; onChan
       )}
 
       {dialog === "create" && (
-        <PromptDialog
-          title="Новая ветка"
-          label="Название"
-          placeholder="Например: acoustic, remix, вариант-2"
-          confirm="Создать и перейти"
-          hint={`Ветка начнётся с текущей версии «${overview.branch}». Можно экспериментировать, основная ветка не изменится.`}
-          onSubmit={async (name) => {
-            await api.createBranch(root, name, null, true);
-            toast(`Создана ветка «${name}»`, "ok");
-            onChanged();
-          }}
-          onClose={() => setDialog(null)}
-        />
+        <BranchDialog overview={overview} onClose={() => setDialog(null)} onCreated={onChanged} />
       )}
       {dialog === "merge" && (
         <MergeDialog overview={overview} onClose={() => setDialog(null)} onMerged={onChanged} />

@@ -183,6 +183,8 @@ const internals = (window as unknown as { __TAURI_INTERNALS__: { convertFileSrc:
 const convert = internals.convertFileSrc;
 internals.convertFileSrc = (path, scheme) =>
   path.startsWith("mock:cover:") ? sampleCover(Number(path.slice(-1))) : convert(path, scheme);
+/** Shared settings, kept for the page's life. */
+const settings = new Map<string, string>();
 mockIPC(
   (cmd, args) => {
     const a = (args ?? {}) as Record<string, unknown>;
@@ -266,14 +268,23 @@ mockIPC(
               auto: true,
             };
       case "plugin:dialog|open":
-        return ["/home/me/Downloads/Ночь_final_v7.wav", "/home/me/Downloads/Stems"];
+        return (a.options as { multiple?: boolean } | undefined)?.multiple === false
+          ? "/home/me/Downloads/Ночь_final_v7.wav"
+          : ["/home/me/Downloads/Ночь_final_v7.wav", "/home/me/Downloads/Stems"];
+      case "plugin:dialog|ask":
+        return true;
+      case "branch_with_file":
+        return id(40);
+      case "move_version":
+        return null;
       case "history_graph":
         return params.has("empty") ? [] : graph;
       case "commit":
         return (a.paths as string[]).length > 0 ? [id(30)] : status.map((_, i) => id(30 + i));
       case "shared_setting":
-        return null;
+        return settings.get(a.key as string) ?? null;
       case "set_shared_setting":
+        settings.set(a.key as string, a.value as string);
         return null;
       case "removed_files":
         return [
