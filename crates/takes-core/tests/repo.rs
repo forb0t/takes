@@ -31,7 +31,7 @@ fn changes(repo: &Repo) -> Vec<(String, ChangeKind)> {
     repo.status()
         .unwrap()
         .into_iter()
-        .map(|Change { path, kind }| (path, kind))
+        .map(|Change { path, kind, .. }| (path, kind))
         .collect()
 }
 
@@ -790,10 +790,7 @@ fn every_file_gets_its_own_version() {
     assert_eq!(ids.len(), 1);
     assert_eq!(
         repo.changes_in(ids[0]).unwrap(),
-        [Change {
-            path: "b.wav".into(),
-            kind: ChangeKind::Deleted
-        }]
+        [Change::new("b.wav", ChangeKind::Deleted)]
     );
     assert_eq!(changes(&repo), [ch("a.wav", ChangeKind::Modified)]);
 }
@@ -928,4 +925,96 @@ fn removed_files_can_be_found_and_brought_back() {
     repo.restore("old/b.wav", &removed[0].last.to_hex(), None, false)
         .unwrap();
     assert_eq!(read(&repo, "old/b.wav"), b"b2");
+}
+
+#[test]
+fn renamed_files_keep_their_history() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "mix.wav", "mix one");
+    repo.commit("mix", &[]).unwrap();
+    write(&repo, "mix.wav", "mix two");
+    repo.commit("mix 2", &[]).unwrap();
+
+    repo.rename_file("mix.wav", "Ночь/mix final.wav").unwrap();
+    let status = repo.status().unwrap();
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].kind, ChangeKind::Renamed);
+    assert_eq!(status[0].path, "Ночь/mix final.wav");
+    assert_eq!(status[0].from.as_deref(), Some("mix.wav"));
+
+    // One version for the rename, whichever of its names is picked.
+    let saved = repo.commit_each(&["mix.wav"], |c| c.path.clone()).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(repo.status().unwrap().is_empty());
+    assert_eq!(
+        repo.changes_in(saved[0]).unwrap(),
+        [Change {
+            path: "Ночь/mix final.wav".into(),
+            kind: ChangeKind::Renamed,
+            from: Some("mix.wav".into()),
+        }]
+    );
+
+    let history = repo.file_history("Ночь/mix final.wav", None).unwrap();
+    let steps: Vec<(ChangeKind, &str)> =
+        history.iter().map(|v| (v.kind, v.path.as_str())).collect();
+    assert_eq!(
+        steps,
+        [
+            (ChangeKind::Renamed, "Ночь/mix final.wav"),
+            (ChangeKind::Modified, "mix.wav"),
+            (ChangeKind::Added, "mix.wav"),
+        ]
+    );
+    // The old name is not a deleted file: it lives on.
+    assert!(repo.removed_files(None).unwrap().is_empty());
+
+    // Moved by hand in the folder: noticed as well.
+    fs::rename(
+        repo.root().join("Ночь/mix final.wav"),
+        repo.root().join("final.wav"),
+    )
+    .unwrap();
+    assert_eq!(
+        repo.status().unwrap(),
+        [Change {
+            path: "final.wav".into(),
+            kind: ChangeKind::Renamed,
+            from: Some("Ночь/mix final.wav".into()),
+        }]
+    );
+    // A different content under a new name is a new file, not a rename.
+    write(&repo, "final.wav", "mix three");
+    assert_eq!(
+        changes(&repo),
+        [
+            ch("final.wav", ChangeKind::Added),
+            ch("Ночь/mix final.wav", ChangeKind::Deleted),
+        ]
+    );
+    assert!(matches!(
+        repo.rename_file("final.wav", "Ночь/mix final.wav"),
+        Ok(())
+    ));
+    write(&repo, "other.wav", "x");
+    assert!(matches!(
+        repo.rename_file("other.wav", "Ночь/mix final.wav"),
+        Err(Error::WouldOverwrite(_))
+    ));
+}
+
+#[test]
+fn empty_files_are_never_taken_for_renames() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "a.txt", "");
+    repo.commit("a", &[]).unwrap();
+    fs::remove_file(repo.root().join("a.txt")).unwrap();
+    write(&repo, "b.txt", "");
+    assert_eq!(
+        changes(&repo),
+        [
+            ch("a.txt", ChangeKind::Deleted),
+            ch("b.txt", ChangeKind::Added)
+        ]
+    );
 }

@@ -15,6 +15,7 @@
   --added: #5fd18b;
   --modified: #f2c35b;
   --deleted: #f07178;
+  --renamed: #8fc7ff;
   --danger: #f07178;
   --radius: 8px;
   --font: "Inter", "Cantarell", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -809,6 +810,11 @@ input[type="checkbox"]:disabled {
   background: rgba(240, 113, 120, 0.13);
 }
 
+.kind-renamed {
+  color: var(--renamed);
+  background: rgba(143, 199, 255, 0.13);
+}
+
 .path {
   min-width: 0;
   overflow: hidden;
@@ -881,12 +887,21 @@ input[type="checkbox"]:disabled {
   border-left-color: var(--deleted);
 }
 
+.pending-renamed {
+  border-left-color: var(--renamed);
+}
+
 .pending-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
   font-size: 13px;
+}
+
+.pending-note {
+  margin: -2px 0 10px;
+  font-size: 12.5px;
 }
 
 .pending textarea {
@@ -933,6 +948,11 @@ input[type="checkbox"]:disabled {
 .status-pill.added {
   color: var(--added);
   background: rgba(95, 209, 139, 0.12);
+}
+
+.status-pill.renamed {
+  color: var(--renamed);
+  background: rgba(143, 199, 255, 0.12);
 }
 
 .status-pill.deleted,
@@ -2644,6 +2664,10 @@ input[type="checkbox"]:disabled {
 
 .bp-state-deleted {
   color: var(--deleted);
+}
+
+.bp-state-renamed {
+  color: var(--renamed);
 }
 
 .bp-branch,

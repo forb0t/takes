@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::hash::Hash;
 
@@ -29,12 +29,26 @@ pub enum ChangeKind {
     Added,
     Modified,
     Deleted,
+    /// Moved or renamed with its content unchanged: it keeps its history.
+    Renamed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub path: String,
     pub kind: ChangeKind,
+    /// The earlier path of a renamed file.
+    pub from: Option<String>,
+}
+
+impl Change {
+    pub fn new(path: impl Into<String>, kind: ChangeKind) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            from: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +72,10 @@ pub struct FileVersion {
     /// `None` when the file was deleted in this snapshot.
     pub entry: Option<Entry>,
     pub kind: ChangeKind,
+    /// What the file was called in this snapshot (it may have been renamed since).
+    pub path: String,
+    /// For a rename, what it was called before.
+    pub from: Option<String>,
 }
 
 /// A file earlier versions had and the latest one does not.
@@ -93,7 +111,7 @@ pub struct Stats {
     pub stored_bytes: u64,
 }
 
-/// Changes that turn `from` into `to`, sorted by path.
+/// Changes that turn `from` into `to`, sorted by path, renames included.
 pub fn diff_trees(from: &Tree, to: &Tree) -> Vec<Change> {
     let mut changes = Vec::new();
     for (path, entry) in to {
@@ -102,17 +120,50 @@ pub fn diff_trees(from: &Tree, to: &Tree) -> Vec<Change> {
             Some(old) if old.blob != entry.blob => ChangeKind::Modified,
             Some(_) => continue,
         };
-        changes.push(Change {
-            path: path.clone(),
-            kind,
-        });
+        changes.push(Change::new(path.clone(), kind));
     }
     for path in from.keys().filter(|p| !to.contains_key(*p)) {
-        changes.push(Change {
-            path: path.clone(),
-            kind: ChangeKind::Deleted,
-        });
+        changes.push(Change::new(path.clone(), ChangeKind::Deleted));
     }
     changes.sort_by(|a, b| a.path.cmp(&b.path));
-    changes
+    pair_renames(changes, |p| from.get(p).copied(), |p| to.get(p).copied())
+}
+
+/// Turns a deletion and an addition of the same content into one rename,
+/// so a moved or renamed file keeps its history. `old` and `new` give the
+/// deleted and the added files. Empty files stay as they are: they all
+/// share one content. Pairs are made in path order.
+pub(crate) fn pair_renames(
+    changes: Vec<Change>,
+    old: impl Fn(&str) -> Option<Entry>,
+    new: impl Fn(&str) -> Option<Entry>,
+) -> Vec<Change> {
+    let mut gone: HashMap<Hash, VecDeque<String>> = HashMap::new();
+    for c in changes.iter().filter(|c| c.kind == ChangeKind::Deleted) {
+        if let Some(entry) = old(&c.path).filter(|e| e.size > 0) {
+            gone.entry(entry.blob)
+                .or_default()
+                .push_back(c.path.clone());
+        }
+    }
+    if gone.is_empty() {
+        return changes;
+    }
+    let mut moved = HashSet::new();
+    let mut out: Vec<Change> = changes
+        .into_iter()
+        .map(|mut c| {
+            if c.kind == ChangeKind::Added
+                && let Some(entry) = new(&c.path)
+                && let Some(from) = gone.get_mut(&entry.blob).and_then(VecDeque::pop_front)
+            {
+                moved.insert(from.clone());
+                c.kind = ChangeKind::Renamed;
+                c.from = Some(from);
+            }
+            c
+        })
+        .collect();
+    out.retain(|c| !(c.kind == ChangeKind::Deleted && moved.contains(&c.path)));
+    out
 }

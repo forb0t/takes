@@ -73,6 +73,7 @@ const KIND = {
   added: { sign: "+", title: "Новый" },
   modified: { sign: "~", title: "Изменён" },
   deleted: { sign: "−", title: "Удалён" },
+  renamed: { sign: "→", title: "Переименован" },
 } as const;
 
 /** Presets first, in their order of work, then the rest by name. */

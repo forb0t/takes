@@ -38,6 +38,7 @@ const WORK_WORD: Record<ChangeKind, string> = {
   added: "новый файл",
   modified: "изменён",
   deleted: "удалён с диска",
+  renamed: "переименован",
 };
 
 function laneText(lane: Lane): string {
@@ -51,6 +52,8 @@ function laneText(lane: Lane): string {
       return lane.versions ? `${saved} · снова в папке` : "новый, ещё не сохранён";
     case "deleted":
       return `${saved} · удалён с диска`;
+    case "renamed":
+      return `${saved} · переименован`;
     case "removed":
       return `${saved} · удалён из проекта`;
     case "elsewhere":
@@ -100,6 +103,8 @@ export function BlueprintTab({
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
+  /** The file being renamed. */
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [showRemoved, setShowRemoved] = useState(false);
   const [drag, setDrag] = useState<{ path: string; to: number } | null>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -269,6 +274,17 @@ export function BlueprintTab({
     }
   }
 
+  async function rename(from: string, to: string) {
+    await api.renameFile(root, from, to);
+    const draft = drafts.get(from);
+    if (draft) {
+      drafts.set(to, draft);
+      drafts.set(from, "");
+    }
+    if (selected?.path === from) select(to, null);
+    onChanged();
+  }
+
   function reveal(path: string) {
     api.reveal(`${root}/${path}`).catch((e) => toast(errorText(e), "error"));
   }
@@ -296,11 +312,16 @@ export function BlueprintTab({
     }
     if (usable) {
       items.push(
-        { label: "Вернуть эту версию в папку", icon: "restore", run: () => actions.restore(n.path, n.version.id) },
+        // Under the song's current name, even if it was called otherwise then.
+        {
+          label: "Вернуть эту версию в папку",
+          icon: "restore",
+          run: () => actions.restore(lane.path, n.version.id, n.path),
+        },
         {
           label: "Положить копию рядом",
           icon: "copy",
-          run: () => actions.saveCopy(n.path, n.version.id, `v${n.number}`),
+          run: () => actions.saveCopy(lane.path, n.version.id, `v${n.number}`, n.path),
         },
         {
           label: "Метки, темп, тональность…",
@@ -349,6 +370,14 @@ export function BlueprintTab({
     }
     if (w.status === "modified") items.push({ label: "Отменить изменения", icon: "undo", run: () => actions.discard(w.path) });
     if (w.status === "deleted") items.push({ label: "Вернуть файл", icon: "restore", run: () => actions.restore(w.path, "HEAD") });
+    const oldName = files?.find((f) => f.path === w.path)?.from;
+    if (w.status === "renamed" && oldName) {
+      items.push({
+        label: "Вернуть старое имя",
+        icon: "undo",
+        run: () => rename(w.path, oldName).catch((e) => toast(errorText(e), "error")),
+      });
+    }
     if (w.status !== "deleted") items.push({ label: "Показать в папке", icon: "folder", run: () => reveal(w.path) });
     return items;
   }
@@ -367,8 +396,11 @@ export function BlueprintTab({
     } else if (lane.status !== "elsewhere") {
       items.push({ label: "Загрузить новую версию…", icon: "download", run: () => onUploadVersion(lane.path) });
     }
-    if (lane.status === "saved" || lane.status === "modified" || lane.status === "added") {
-      items.push({ label: "Показать в папке", icon: "folder", run: () => reveal(lane.path) });
+    if (lane.status !== "deleted" && lane.status !== "removed" && lane.status !== "elsewhere") {
+      items.push(
+        { label: "Переименовать…", icon: "edit", run: () => setRenaming(lane.path) },
+        { label: "Показать в папке", icon: "folder", run: () => reveal(lane.path) },
+      );
     }
     if (i > lo) {
       items.push(
@@ -498,7 +530,7 @@ export function BlueprintTab({
                     </span>
                     <div className="bp-lane-info">
                       <div className="bp-lane-title">
-                        {lane.status === "added" || lane.status === "modified" || lane.status === "deleted" ? (
+                        {lane.status !== "saved" && lane.status !== "removed" && lane.status !== "elsewhere" ? (
                           <KindBadge kind={lane.status} />
                         ) : (
                           <span className="bp-lane-dot" />
@@ -607,6 +639,11 @@ export function BlueprintTab({
                           <div className="bp-node-head">
                             {v.parents.length > 1 && <Icon name="merge" size={12} />}
                             <span className="bp-num">{n.number ? `v${n.number}` : "удалён"}</span>
+                            {n.change === "renamed" && (
+                              <span className="bp-state bp-state-renamed" title={`Было: ${n.from ?? ""}`}>
+                                переименован
+                              </span>
+                            )}
                             {n.inFolder && (
                               <span className="bp-here" title="Эта версия сейчас лежит в папке проекта">
                                 в папке
@@ -639,7 +676,7 @@ export function BlueprintTab({
                               </span>
                             )}
                             {usable && <PlayButton track={versionTrack(n)} />}
-                            {usable && prev && !prev.pruned && (
+                            {usable && prev && !prev.pruned && n.change !== "renamed" && (
                               <CompareButton a={versionTrack(prev)} b={versionTrack(n)} />
                             )}
                           </div>
@@ -705,6 +742,7 @@ export function BlueprintTab({
             onChanged={onChanged}
             onLabelsChanged={onLabelsChanged}
             onUploadVersion={() => onUploadVersion(panelLane.path)}
+            onRenamed={(to) => select(to, null)}
           />
         </aside>
       )}
@@ -726,6 +764,17 @@ export function BlueprintTab({
             onChanged();
           }}
           onClose={() => setPrompt(null)}
+        />
+      )}
+      {renaming && (
+        <PromptDialog
+          title={`Переименовать «${splitPath(renaming).name}»`}
+          label="Новое имя (можно с папкой: «Демо/Ночь.wav»)"
+          initial={renaming}
+          confirm="Переименовать"
+          hint="Файл переименуется в папке проекта. Сохраните версию — и история останется с ним под новым именем."
+          onSubmit={(to) => rename(renaming, to.replace(/\\/g, "/"))}
+          onClose={() => setRenaming(null)}
         />
       )}
       {meta && (

@@ -11,8 +11,8 @@ use crate::error::{Error, Result};
 use crate::hash::Hash;
 use crate::merge::{self, Conflict, MergeKind, MergeOutcome, MergePreview, Resolution, ThreeWay};
 use crate::model::{
-    Branch, Change, ChangeKind, Comment, Entry, FileVersion, RemovedFile, Snapshot, Stats, Tag,
-    Tree, diff_trees,
+    self, Branch, Change, ChangeKind, Comment, Entry, FileVersion, RemovedFile, Snapshot, Stats,
+    Tag, Tree, diff_trees,
 };
 use crate::store::{self, Blob, ObjectStore};
 use crate::worktree::{self, META_DIR, WorkFile};
@@ -497,23 +497,49 @@ impl Repo {
             .collect()
     }
 
-    /// Versions in which `path` was added, changed or deleted, newest first.
-    pub fn file_history(&self, path: &str, rev: Option<&str>) -> Result<Vec<FileVersion>> {
-        let entries: HashMap<Hash, Entry> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT snapshot_id, blob_hash, size FROM snapshot_entries WHERE path = ?1",
-            )?;
-            stmt.query_map([path], |r| {
-                Ok((
-                    r.get(0)?,
-                    Entry {
-                        blob: r.get(1)?,
-                        size: r.get::<_, i64>(2)? as u64,
-                    },
-                ))
-            })?
-            .collect::<rusqlite::Result<_>>()?
+    /// Every version that had `path`, with the file in it.
+    fn entries_of(&self, path: &str) -> Result<HashMap<Hash, Entry>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT snapshot_id, blob_hash, size FROM snapshot_entries WHERE path = ?1",
+        )?;
+        let rows = stmt.query_map([path], |r| {
+            Ok((
+                r.get(0)?,
+                Entry {
+                    blob: r.get(1)?,
+                    size: r.get::<_, i64>(2)? as u64,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The rename `snapshot` made, from or to `path` (whichever is given),
+    /// compared with its first parent.
+    fn rename_in(
+        &self,
+        snapshot: &Snapshot,
+        to: Option<&str>,
+        from: Option<&str>,
+    ) -> Result<Option<Change>> {
+        let Some(parent) = snapshot.parents.first() else {
+            return Ok(None);
         };
+        Ok(diff_trees(&self.tree(*parent)?, &self.tree(snapshot.id)?)
+            .into_iter()
+            .find(|c| {
+                c.kind == ChangeKind::Renamed
+                    && to.is_none_or(|t| c.path == t)
+                    && from.is_none_or(|f| c.from.as_deref() == Some(f))
+            }))
+    }
+
+    /// Versions in which `path` was added, changed, renamed or deleted,
+    /// newest first. A rename is followed back: older versions come under
+    /// the name the file had then.
+    pub fn file_history(&self, path: &str, rev: Option<&str>) -> Result<Vec<FileVersion>> {
+        let mut path = path.to_owned();
+        let mut entries = self.entries_of(&path)?;
         let mut versions = Vec::new();
         for snapshot in self.log(rev)? {
             let entry = entries.get(&snapshot.id).copied();
@@ -521,17 +547,26 @@ impl Repo {
                 .parents
                 .first()
                 .and_then(|p| entries.get(p).copied());
-            let kind = match (before, entry) {
-                (None, Some(_)) => ChangeKind::Added,
-                (Some(_), None) => ChangeKind::Deleted,
-                (Some(a), Some(b)) if a.blob != b.blob => ChangeKind::Modified,
+            let (kind, from) = match (before, entry) {
+                (None, Some(_)) => match self.rename_in(&snapshot, Some(&path), None)? {
+                    Some(rename) => (ChangeKind::Renamed, rename.from),
+                    None => (ChangeKind::Added, None),
+                },
+                (Some(_), None) => (ChangeKind::Deleted, None),
+                (Some(a), Some(b)) if a.blob != b.blob => (ChangeKind::Modified, None),
                 _ => continue,
             };
             versions.push(FileVersion {
                 snapshot,
                 entry,
                 kind,
+                path: path.clone(),
+                from: from.clone(),
             });
+            if let Some(from) = from {
+                entries = self.entries_of(&from)?;
+                path = from;
+            }
         }
         Ok(versions)
     }
@@ -576,10 +611,27 @@ impl Repo {
                 }
             }
         }
-        let mut removed: Vec<RemovedFile> = latest
-            .into_iter()
-            .map(|(path, last)| RemovedFile { path, last })
-            .collect();
+        // A file renamed away lives on under its new name.
+        let mut removed = Vec::new();
+        for (path, last) in latest {
+            let mut renamed = false;
+            for id in order
+                .keys()
+                .filter(|id| graph.parents_of(id).first() == Some(&last))
+            {
+                if self.entry(*id, &path)?.is_none()
+                    && self
+                        .rename_in(&self.snapshot(*id)?, None, Some(&path))?
+                        .is_some()
+                {
+                    renamed = true;
+                    break;
+                }
+            }
+            if !renamed {
+                removed.push(RemovedFile { path, last });
+            }
+        }
         removed.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(removed)
     }
@@ -693,47 +745,77 @@ impl Repo {
     ) -> Result<Vec<(Change, Option<WorkFile>)>> {
         let cache = self.worktree_cache()?;
         let mut hashed = Vec::new();
+        let mut content = |file: &WorkFile| -> Result<Hash> {
+            match cache.get(&file.path) {
+                Some(&(size, mtime, blob)) if size == file.size && mtime == file.mtime_ns => {
+                    Ok(blob)
+                }
+                _ => {
+                    let blob = hash(file)?;
+                    hashed.push((file.path.clone(), file.size, file.mtime_ns, blob));
+                    Ok(blob)
+                }
+            }
+        };
         let mut changes = Vec::new();
         let mut present = HashSet::new();
+        let mut added = Vec::new();
         for file in worktree::scan(&self.root)? {
             let kind = match base.get(&file.path) {
-                None => Some(ChangeKind::Added),
+                None => {
+                    added.push(file);
+                    continue;
+                }
                 // Another size is another content, so there is no need to
                 // read it: status stays cheap while a DAW records into a file.
                 Some(saved) if saved.size != file.size => Some(ChangeKind::Modified),
-                Some(saved) => {
-                    let blob = match cache.get(&file.path) {
-                        Some(&(size, mtime, blob))
-                            if size == file.size && mtime == file.mtime_ns =>
-                        {
-                            blob
-                        }
-                        _ => {
-                            let blob = hash(&file)?;
-                            hashed.push((file.path.clone(), file.size, file.mtime_ns, blob));
-                            blob
-                        }
-                    };
-                    (blob != saved.blob).then_some(ChangeKind::Modified)
-                }
+                Some(saved) => (content(&file)? != saved.blob).then_some(ChangeKind::Modified),
             };
             present.insert(file.path.clone());
             if let Some(kind) = kind {
-                let change = Change {
-                    path: file.path.clone(),
-                    kind,
-                };
-                changes.push((change, Some(file)));
+                changes.push((Change::new(file.path.clone(), kind), Some(file)));
             }
         }
-        for path in base.keys().filter(|p| !present.contains(*p)) {
-            let change = Change {
-                path: path.clone(),
-                kind: ChangeKind::Deleted,
-            };
-            changes.push((change, None));
+        let mut deleted_sizes = HashSet::new();
+        for (path, entry) in base.iter().filter(|(p, _)| !present.contains(*p)) {
+            deleted_sizes.insert(entry.size);
+            changes.push((Change::new(path.clone(), ChangeKind::Deleted), None));
+        }
+        // A new file with the size of a deleted one may be that file renamed:
+        // only those are read.
+        let mut new_content = HashMap::new();
+        for file in added {
+            if file.size > 0 && deleted_sizes.contains(&file.size) {
+                let blob = content(&file)?;
+                new_content.insert(
+                    file.path.clone(),
+                    Entry {
+                        blob,
+                        size: file.size,
+                    },
+                );
+            }
+            changes.push((
+                Change::new(file.path.clone(), ChangeKind::Added),
+                Some(file),
+            ));
         }
         changes.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+        let (list, mut files): (Vec<Change>, HashMap<String, Option<WorkFile>>) = changes
+            .into_iter()
+            .map(|(c, f)| (c.clone(), (c.path, f)))
+            .unzip();
+        let changes = model::pair_renames(
+            list,
+            |p| base.get(p).copied(),
+            |p| new_content.get(p).copied(),
+        )
+        .into_iter()
+        .map(|c| {
+            let file = files.remove(&c.path).flatten();
+            (c, file)
+        })
+        .collect();
         self.cache_put_all(&hashed)?;
         Ok(changes)
     }
@@ -860,6 +942,8 @@ impl Repo {
         paths: &[&str],
     ) -> Result<(Vec<(Change, Option<Blob>)>, Vec<(String, u64, i64, Hash)>)> {
         let selected = |path: &str| paths.is_empty() || paths.iter().any(|p| path_matches(p, path));
+        // A rename belongs to both its paths.
+        let picked = |c: &Change| selected(&c.path) || c.from.as_deref().is_some_and(selected);
         // A selected file that has to be read to find out whether it changed
         // is stored right away, so every file is read once.
         let mut stored: HashMap<String, Blob> = HashMap::new();
@@ -874,14 +958,17 @@ impl Repo {
                 Ok(hash)
             })?
             .into_iter()
-            .filter(|(c, _)| selected(&c.path))
+            .filter(|(c, _)| picked(c))
             .collect();
         let mut out = Vec::new();
         let mut fresh = Vec::new();
         for (change, file) in changes {
-            let blob = match file {
-                None => None,
-                Some(file) => Some(match stored.remove(&change.path) {
+            let renamed = change.from.as_ref().and_then(|from| base.get(from));
+            let blob = match (renamed, file) {
+                // The content is stored already, under the old name.
+                (Some(saved), _) => Some(self.blob(saved.blob)?),
+                (None, None) => None,
+                (None, Some(file)) => Some(match stored.remove(&change.path) {
                     Some(blob) => blob,
                     None => {
                         let blob = self.store_file(&file)?;
@@ -995,6 +1082,52 @@ impl Repo {
         self.materialize(target, &entry)
     }
 
+    /// Renames or moves a file inside the project folder. Like any edit, it
+    /// shows up as an unsaved change: a rename, so the file keeps its history.
+    pub fn rename_file(&self, from: &str, to: &str) -> Result<()> {
+        let to = to.trim_matches('/');
+        if from == to {
+            return Ok(());
+        }
+        let src = self.abs(from)?;
+        let dest = self.abs(to)?;
+        if !src.is_file() {
+            return Err(Error::PathNotFound {
+                path: from.into(),
+                rev: "the folder".into(),
+            });
+        }
+        // On Windows and macOS "Song.wav" and "song.wav" are one file.
+        let case_only = from.to_lowercase() == to.to_lowercase();
+        if dest.exists() && !case_only {
+            return Err(Error::WouldOverwrite(vec![to.to_owned()]));
+        }
+        let busy = self.busy_files([from])?;
+        if !busy.is_empty() {
+            return Err(Error::FileBusy(busy));
+        }
+        fs::create_dir_all(dest.parent().expect("project files live inside the root"))?;
+        fs::rename(&src, &dest).map_err(|e| busy_or_io(e, from))?;
+        // Same content: its known hash moves along, so nothing is read again.
+        self.conn.execute(
+            "UPDATE OR REPLACE worktree_cache SET path = ?2 WHERE path = ?1",
+            [from, to],
+        )?;
+        self.prune_empty_dirs(&src);
+        Ok(())
+    }
+
+    /// Removes folders left empty above a moved or deleted file, never the root.
+    fn prune_empty_dirs(&self, file: &Path) {
+        let mut dir = file.parent();
+        while let Some(d) = dir {
+            if d == self.root || fs::remove_dir(d).is_err() {
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+
     /// Makes the working folder go from `from` to `to`. Assumes it currently
     /// matches `from`; checks first that no unsaved file would be clobbered.
     fn apply_tree(&self, from: &Tree, to: &Tree) -> Result<()> {
@@ -1044,14 +1177,7 @@ impl Repo {
         }
         self.conn
             .execute("DELETE FROM worktree_cache WHERE path = ?1", [path])?;
-        // Drop folders the removal left empty, but never the project root.
-        let mut dir = abs.parent();
-        while let Some(d) = dir {
-            if d == self.root || fs::remove_dir(d).is_err() {
-                break;
-            }
-            dir = d.parent();
-        }
+        self.prune_empty_dirs(&abs);
         Ok(())
     }
 
@@ -1447,6 +1573,9 @@ pub fn validate_name(name: &str) -> Result<()> {
 
 /// Puts one change into `tree`, collecting the new content.
 fn apply_change(tree: &mut Tree, change: Change, blob: Option<Blob>, blobs: &mut Vec<Blob>) {
+    if let Some(from) = &change.from {
+        tree.remove(from);
+    }
     match blob {
         None => {
             tree.remove(&change.path);

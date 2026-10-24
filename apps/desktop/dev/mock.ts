@@ -27,22 +27,23 @@ const graph: GraphVersion[] = (
     [14, [3], "Ночь: перезаписал вокал", "nikita", 3600 * 30, [["02 Ночь/demo.wav", "modified"]]],
     [3, [21], "Intro: переписал синты, убрал лишний пад", "nikita", 86400 * 3, [["01 Intro.wav", "modified"]]],
     [21, [20], "Текст акустической версии", "masha", 86400 * 4, [["02 Ночь/lyrics (acoustic).txt", "added"]]],
-    [20, [19], "Старый баунс «Рассвета»", "nikita", 86400 * 4.2, [["03 Рассвет/old_bounce.mp3", "added"]]],
-    [19, [18], "Трек-лист", "masha", 86400 * 4.5, [["tracklist.md", "added"]]],
+    [20, [22], "Старый баунс «Рассвета»", "nikita", 86400 * 4.2, [["03 Рассвет/old_bounce.mp3", "added"]]],
+    [22, [19], "Трек-лист в Markdown", "masha", 86400 * 4.3, [["tracklist.md", "renamed", "треклист.txt"]]],
+    [19, [18], "Трек-лист", "masha", 86400 * 4.5, [["треклист.txt", "added"]]],
     [18, [13], "Аккорды «Ночи»", "masha", 86400 * 4.8, [["02 Ночь/chords.pdf", "added"]]],
     [13, [2], "Проект «Рассвета»", "nikita", 86400 * 5, [["03 Рассвет/Рассвет Project/Рассвет.als", "added"]]],
     [2, [12], "Черновик обложки", "masha", 86400 * 9, [["cover.png", "added"]]],
     [12, [11], "Текст «Ночи»", "nikita", 86400 * 20, [["02 Ночь/lyrics.txt", "added"]]],
     [11, [1], "Демо «Ночи»", "nikita", 86400 * 25, [["02 Ночь/demo.wav", "added"]]],
     [1, [], "Первые демки: Intro", "nikita", 86400 * 30, [["01 Intro.wav", "added"]]],
-  ] as [number, number[], string, string, number, [string, Change["kind"]][]][]
+  ] as [number, number[], string, string, number, [string, Change["kind"], string?][]][]
 ).map(([n, parents, message, author, ago, changes]) => ({
   id: id(n),
   parents: parents.map(id),
   message,
   author,
   createdAt: now - ago,
-  changes: changes.map(([path, kind]) => ({ path, kind, size: null, pruned: false, labels: [] })),
+  changes: changes.map(([path, kind, from]) => ({ path, kind, from: from ?? null, size: null, pruned: false, labels: [] })),
 }));
 
 const overview: Overview = {
@@ -69,6 +70,7 @@ const status: Change[] = params.has("clean")
       { path: "02 Ночь/lyrics.txt", kind: "modified", size: null, pruned: false, labels: [] },
       { path: "03 Рассвет/old_bounce.mp3", kind: "deleted", size: null, pruned: false, labels: [] },
       { path: "03 Рассвет/Рассвет Project/Рассвет.als", kind: "modified", size: null, pruned: false, labels: [] },
+      { path: "Обложка (финал).png", kind: "renamed", from: "cover.png", size: null, pruned: false, labels: [] },
     ];
 
 const files = [
@@ -213,6 +215,8 @@ mockIPC(
       case "file_history":
         return log.slice(1).map((snapshot, i) => ({
           snapshot,
+          path: a.path,
+          from: null,
           kind: i === log.length - 2 ? "added" : "modified",
           size: 50_000_000 + i * 1_200_000,
           pruned: i === 2 || i === 3,

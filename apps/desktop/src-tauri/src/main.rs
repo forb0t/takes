@@ -41,6 +41,7 @@ fn main() {
             commands::delete_tag,
             commands::merge_preview,
             commands::merge,
+            commands::rename_file,
             commands::restore,
             commands::preview_file,
             commands::analyze_audio,

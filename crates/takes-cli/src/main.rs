@@ -97,6 +97,9 @@ enum Command {
         #[arg(short, long, requires = "name")]
         delete: bool,
     },
+    /// Rename or move a file in the project; it keeps its history
+    #[command(alias = "move")]
+    Mv { from: PathBuf, to: PathBuf },
     /// Bring back a file as it was in an older version
     Restore {
         path: PathBuf,
@@ -376,6 +379,9 @@ fn run(command: Command) -> Result<ExitCode> {
                         let s = &version.snapshot;
                         let what = match (version.kind, version.entry) {
                             (ChangeKind::Deleted, _) | (_, None) => "deleted".to_owned(),
+                            (ChangeKind::Renamed, _) => {
+                                format!("renamed from {}", version.from.unwrap_or_default())
+                            }
                             (kind, Some(e)) => {
                                 format!("{} {}", kind_word(kind), human_size(e.size))
                             }
@@ -547,6 +553,14 @@ fn run(command: Command) -> Result<ExitCode> {
             let dest = as_path.map(|p| project_path(&repo, &p)).transpose()?;
             repo.restore(&path, &from, dest.as_deref(), force)?;
             println!("Restored {} from {from}", dest.as_deref().unwrap_or(&path));
+        }
+
+        Command::Mv { from, to } => {
+            let repo = open()?;
+            let from = project_path(&repo, &from)?;
+            let to = project_path(&repo, &to)?;
+            repo.rename_file(&from, &to)?;
+            println!("Renamed {from} -> {to}; save it to keep the new name");
         }
 
         Command::Export { rev, path, dest } => {
@@ -998,11 +1012,11 @@ fn project_path(repo: &Repo, path: &Path) -> Result<String> {
 }
 
 fn format_change(change: &Change) -> String {
-    format!(
-        "{:<9} {}",
-        format!("{}:", kind_word(change.kind)),
-        change.path
-    )
+    let path = match &change.from {
+        Some(from) => format!("{from} -> {}", change.path),
+        None => change.path.clone(),
+    };
+    format!("{:<9} {path}", format!("{}:", kind_word(change.kind)))
 }
 
 fn kind_word(kind: ChangeKind) -> &'static str {
@@ -1010,6 +1024,7 @@ fn kind_word(kind: ChangeKind) -> &'static str {
         ChangeKind::Added => "added",
         ChangeKind::Modified => "modified",
         ChangeKind::Deleted => "deleted",
+        ChangeKind::Renamed => "renamed",
     }
 }
 

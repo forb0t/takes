@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type ChangeKind = "added" | "modified" | "deleted";
+/** "renamed": moved or renamed with the same content; the file keeps its history. */
+export type ChangeKind = "added" | "modified" | "deleted" | "renamed";
 
 export interface Change {
   path: string;
@@ -10,6 +11,8 @@ export interface Change {
   pruned: boolean;
   /** Labels on the content ("мастер", …); only in a version's changes. */
   labels: string[];
+  /** The earlier path of a renamed file. */
+  from?: string | null;
 }
 
 export interface Snapshot {
@@ -50,6 +53,10 @@ export interface FileInfo {
 export interface FileVersion {
   snapshot: Snapshot;
   kind: ChangeKind;
+  /** What the file was called in this version (it may have been renamed since). */
+  path: string;
+  /** For a rename, what it was called before. */
+  from: string | null;
   size: number | null;
   pruned: boolean;
   labels: string[];
@@ -275,6 +282,8 @@ export const api = {
   merge: (root: string, rev: string, resolutions: Record<string, Resolution>) =>
     invoke<MergeOutcome>("merge", { root, rev, resolutions }),
 
+  /** Renames or moves a file in the folder; saved, it keeps its history. */
+  renameFile: (root: string, from: string, to: string) => invoke<void>("rename_file", { root, from, to }),
   restore: (root: string, path: string, rev: string, dest: string | null, force: boolean) =>
     invoke<void>("restore", { root, path, rev, dest, force }),
   previewFile: (root: string, rev: string | null, path: string) =>

@@ -11,6 +11,7 @@ import {
   labelsById,
   plural,
   short,
+  splitPath,
   type Label,
 } from "../util";
 import { useFileActions } from "./useFileActions";
@@ -233,6 +234,11 @@ export function VersionDetail({
             <div key={c.path} className="row">
               <KindBadge kind={c.kind} />
               <PathLabel path={c.path} />
+              {c.kind === "renamed" && c.from && (
+                <span className="muted nowrap" title={`Было: ${c.from}`}>
+                  из «{splitPath(c.from).name}»
+                </span>
+              )}
               <FileLabels labels={c.labels} />
               {c.size !== null && <span className="size">{formatSize(c.size)}</span>}
               {c.pruned ? (

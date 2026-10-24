@@ -10,7 +10,7 @@ import {
   type RemovedFile,
 } from "../api";
 import { CompareButton, PlayButton } from "../player";
-import { Empty, FileLabels, Icon, KindBadge, useToast } from "../ui";
+import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast } from "../ui";
 import { formatDate, formatSize, naturalCompare, plural, short, splitPath } from "../util";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { useFileActions } from "./useFileActions";
@@ -25,17 +25,26 @@ export interface ProjectFile {
   /** Size of the saved version; null for a file never saved. */
   size: number | null;
   labels: string[];
+  /** The saved name of a file renamed on disk. */
+  from: string | null;
 }
 
 /** Saved files of the current version merged with the unsaved changes. */
 export function projectFiles(saved: FileInfo[], changes: Change[]): ProjectFile[] {
   const byPath = new Map<string, ProjectFile>(
-    saved.map((f) => [f.path, { path: f.path, status: "saved", size: f.size, labels: f.labels }]),
+    saved.map((f) => [f.path, { path: f.path, status: "saved", size: f.size, labels: f.labels, from: null }]),
   );
   for (const c of changes) {
+    const old = c.kind === "renamed" && c.from ? byPath.get(c.from) : undefined;
+    if (old) {
+      // One file under its new name, not a deleted one and a new one.
+      byPath.delete(old.path);
+      byPath.set(c.path, { ...old, path: c.path, status: "renamed", from: old.path });
+      continue;
+    }
     const known = byPath.get(c.path);
     if (known) known.status = c.kind;
-    else byPath.set(c.path, { path: c.path, status: c.kind, size: null, labels: [] });
+    else byPath.set(c.path, { path: c.path, status: c.kind, size: null, labels: [], from: null });
   }
   return [...byPath.values()].sort((a, b) => naturalCompare(a.path, b.path));
 }
@@ -52,6 +61,7 @@ const STATUS_TEXT: Record<ChangeKind, string> = {
   modified: "Изменён — не сохранено",
   added: "Новый файл — ещё не сохранён",
   deleted: "Удалён с диска — не сохранено",
+  renamed: "Переименован — не сохранено",
 };
 
 /**
@@ -276,6 +286,7 @@ export function FilesTab({
             onChanged={onChanged}
             onLabelsChanged={onLabelsChanged}
             onUploadVersion={() => onUploadVersion(selected)}
+            onRenamed={setSelected}
           />
         ) : (
           <div className="center muted">Выберите файл</div>
@@ -304,6 +315,7 @@ export function FileDetail({
   onChanged,
   onLabelsChanged,
   onUploadVersion,
+  onRenamed,
 }: {
   overview: Overview;
   path: string;
@@ -324,6 +336,8 @@ export function FileDetail({
   onChanged: () => void;
   onLabelsChanged: () => void;
   onUploadVersion: () => void;
+  /** The file got another name (or folder) on disk. */
+  onRenamed: (path: string) => void;
 }) {
   const root = overview.root;
   const head = overview.head;
@@ -333,6 +347,7 @@ export function FileDetail({
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<FileVersion | null>(null);
   const [saving, setSaving] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const draftBox = useRef<HTMLTextAreaElement>(null);
   const highlighted = useRef<HTMLDivElement>(null);
 
@@ -380,6 +395,17 @@ export function FileDetail({
     }
   }
 
+  async function rename(to: string) {
+    await api.renameFile(root, path, to);
+    // The description follows the file to its new name.
+    if (draft) {
+      drafts.set(to, draft);
+      drafts.set(path, "");
+    }
+    onRenamed(to);
+    onChanged();
+  }
+
   const count = versions?.filter((v) => v.kind !== "deleted").length ?? 0;
   return (
     <div className="detail">
@@ -420,12 +446,21 @@ export function FileDetail({
             </button>
           )}
           {!removed && !elsewhere && pending !== "deleted" && (
-            <button
-              className="btn"
-              onClick={() => api.reveal(`${root}/${path}`).catch((e) => toast(errorText(e), "error"))}
-            >
-              <Icon name="folder" /> Показать в папке
-            </button>
+            <>
+              <button
+                className="btn"
+                onClick={() => setRenaming(true)}
+                title="Новое имя или папка; история версий останется с файлом"
+              >
+                <Icon name="edit" /> Переименовать…
+              </button>
+              <button
+                className="btn"
+                onClick={() => api.reveal(`${root}/${path}`).catch((e) => toast(errorText(e), "error"))}
+              >
+                <Icon name="folder" /> Показать в папке
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -449,6 +484,11 @@ export function FileDetail({
               <PlayButton track={{ root, rev: head, path, label: `Последняя версия ${short(head)}` }} text="было" />
             )}
           </div>
+          {pending === "renamed" && file?.from && (
+            <div className="pending-note muted">
+              Было: «{file.from}». Содержимое то же, история версий переходит к новому имени.
+            </div>
+          )}
           <textarea
             ref={draftBox}
             value={draft}
@@ -475,6 +515,11 @@ export function FileDetail({
             {pending === "deleted" && (
               <button className="btn" onClick={() => actions.restore(path, "HEAD")}>
                 <Icon name="restore" size={14} /> Вернуть файл
+              </button>
+            )}
+            {pending === "renamed" && file?.from && (
+              <button className="btn btn-ghost" onClick={() => rename(file.from!)}>
+                <Icon name="undo" size={14} /> Вернуть старое имя
               </button>
             )}
             <button className="btn btn-primary" disabled={saving} onClick={save}>
@@ -505,6 +550,16 @@ export function FileDetail({
                 <div className="version-title">
                   <KindBadge kind={v.kind} />
                   <span className="version-message">{v.snapshot.message || "Без описания"}</span>
+                  {v.kind === "renamed" && v.from && (
+                    <span className="muted nowrap" title={`Было: ${v.from}`}>
+                      из «{splitPath(v.from).name}»
+                    </span>
+                  )}
+                  {v.kind !== "renamed" && v.path !== path && (
+                    <span className="muted nowrap" title={v.path}>
+                      как «{splitPath(v.path).name}»
+                    </span>
+                  )}
                   {i === 0 && exists && !removed && !rev && <span className="label label-current">последняя</span>}
                   {v.pruned && (
                     <span className="muted" title="Содержимое удалено при очистке места">
@@ -524,11 +579,18 @@ export function FileDetail({
                 <div className="row-actions">
                   {previous && !previous.pruned && (
                     <CompareButton
-                      a={{ root, rev: previous.snapshot.id, path, label: `Предыдущая · ${previous.snapshot.message}` }}
-                      b={{ root, rev: id, path, label: `${short(id)} · ${v.snapshot.message}` }}
+                      a={{
+                        root,
+                        rev: previous.snapshot.id,
+                        path: previous.path,
+                        label: `Предыдущая · ${previous.snapshot.message}`,
+                      }}
+                      b={{ root, rev: id, path: v.path, label: `${short(id)} · ${v.snapshot.message}` }}
                     />
                   )}
-                  <PlayButton track={{ root, rev: id, path, label: `Версия ${short(id)} · ${v.snapshot.message}` }} />
+                  <PlayButton
+                    track={{ root, rev: id, path: v.path, label: `Версия ${short(id)} · ${v.snapshot.message}` }}
+                  />
                   <button
                     className="btn btn-small btn-ghost"
                     title="Метки («демо», «мастер»…), темп и тональность"
@@ -539,14 +601,14 @@ export function FileDetail({
                   <button
                     className="btn btn-small btn-ghost"
                     title="Вернуть файл в папку проекта в этом виде"
-                    onClick={() => actions.restore(path, id)}
+                    onClick={() => actions.restore(path, id, v.path)}
                   >
                     <Icon name="restore" size={14} /> Вернуть
                   </button>
                   <button
                     className="btn btn-small btn-ghost"
                     title="Положить эту версию рядом, под другим именем"
-                    onClick={() => actions.saveCopy(path, id, short(id))}
+                    onClick={() => actions.saveCopy(path, id, short(id), v.path)}
                   >
                     <Icon name="copy" size={14} /> Копия
                   </button>
@@ -556,11 +618,22 @@ export function FileDetail({
           );
         })}
       </div>
+      {renaming && (
+        <PromptDialog
+          title={`Переименовать «${name}»`}
+          label="Новое имя (можно с папкой: «Демо/Ночь.wav»)"
+          initial={path}
+          confirm="Переименовать"
+          hint="Файл переименуется в папке проекта. Сохраните версию — и история останется с ним под новым именем."
+          onSubmit={(to) => rename(to.replace(/\\/g, "/"))}
+          onClose={() => setRenaming(false)}
+        />
+      )}
       {editing && (
         <FileMetaDialog
           root={root}
           rev={editing.snapshot.id}
-          path={path}
+          path={editing.path}
           versionLabel={`Версия ${short(editing.snapshot.id)} · ${editing.snapshot.message || "без описания"}`}
           onClose={() => setEditing(null)}
           onSaved={onLabelsChanged}

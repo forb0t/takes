@@ -33,14 +33,22 @@ export function useFileActions(root: string, onChanged: () => void) {
   }
 
   return {
-    /** Put the file back as it was in `rev`. */
-    restore: (path: string, rev: string) =>
-      restoreTo(path, rev, null, `«${splitPath(path).name}» возвращён. Сохраните версию, чтобы закрепить.`),
+    /**
+     * Put the file back as it was in `rev`. `source` is its name in that
+     * version when it was renamed since.
+     */
+    restore: (path: string, rev: string, source = path) =>
+      restoreTo(
+        source,
+        rev,
+        source === path ? null : path,
+        `«${splitPath(path).name}» возвращён. Сохраните версию, чтобы закрепить.`,
+      ),
 
     /** Put that version next to the current file as `name (label).ext`. */
-    saveCopy: (path: string, rev: string, label: string) => {
+    saveCopy: (path: string, rev: string, label: string, source = path) => {
       const dest = copyName(path, label);
-      return restoreTo(path, rev, dest, `Копия сохранена как «${splitPath(dest).name}»`);
+      return restoreTo(source, rev, dest, `Копия сохранена как «${splitPath(dest).name}»`);
     },
 
     /** Throw away unsaved edits of a file. */

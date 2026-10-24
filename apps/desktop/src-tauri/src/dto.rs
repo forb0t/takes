@@ -13,6 +13,7 @@ fn kind(kind: ChangeKind) -> &'static str {
         ChangeKind::Added => "added",
         ChangeKind::Modified => "modified",
         ChangeKind::Deleted => "deleted",
+        ChangeKind::Renamed => "renamed",
     }
 }
 
@@ -27,6 +28,8 @@ pub struct ChangeDto {
     pub pruned: bool,
     /// Labels on the new content ("мастер", …).
     pub labels: Vec<String>,
+    /// The earlier path of a renamed file.
+    pub from: Option<String>,
 }
 
 impl From<&Change> for ChangeDto {
@@ -34,6 +37,7 @@ impl From<&Change> for ChangeDto {
         Self {
             path: c.path.clone(),
             kind: kind(c.kind),
+            from: c.from.clone(),
             size: None,
             pruned: false,
             labels: Vec::new(),
@@ -130,6 +134,10 @@ pub struct RemovedFileDto {
 pub struct FileVersionDto {
     pub snapshot: SnapshotDto,
     pub kind: &'static str,
+    /// What the file was called in this version.
+    pub path: String,
+    /// For a rename, what it was called before.
+    pub from: Option<String>,
     pub size: Option<u64>,
     pub pruned: bool,
     pub labels: Vec<String>,
@@ -140,6 +148,8 @@ impl FileVersionDto {
         Self {
             snapshot: (&v.snapshot).into(),
             kind: kind(v.kind),
+            path: v.path.clone(),
+            from: v.from.clone(),
             size: v.entry.map(|e| e.size),
             pruned: v.entry.is_some_and(|e| pruned.contains(&e.blob)),
             labels: labels(meta, v.entry.map(|e| e.blob)),

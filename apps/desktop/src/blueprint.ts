@@ -24,6 +24,8 @@ export interface SongVersion {
   path: string;
   version: GraphVersion;
   change: ChangeKind;
+  /** For a rename, the name before. */
+  from: string | null;
   /** Content removed by cleanup: cannot be played or restored. */
   pruned: boolean;
   labels: string[];
@@ -122,6 +124,19 @@ export function buildLanes(
     return unique.filter((k) => !unique.some((o) => o !== k && isBefore(k, o)));
   };
 
+  // A renamed song keeps its lane: names of one song are joined here.
+  const alias = new Map<string, string>();
+  const song = (path: string): string => {
+    let at = path;
+    while (alias.has(at)) at = alias.get(at)!;
+    return at;
+  };
+  const join = (a: string, b: string) => {
+    const ra = song(a);
+    const rb = song(b);
+    if (ra !== rb) alias.set(ra, rb);
+  };
+
   for (const v of [...versions].reverse()) {
     const from = v.parents.map((p) => latest.get(p)).filter((m): m is Map<string, string[]> => !!m);
     const inherited = new Map(from[0] ?? []);
@@ -133,15 +148,19 @@ export function buildLanes(
     }
     for (const c of v.changes) {
       const key = keyOf(v.id, c.path);
+      // A rename continues the song's history under its new name.
+      const before = c.kind === "renamed" && c.from ? c.from : c.path;
+      if (before !== c.path) join(before, c.path);
       nodes.set(key, {
         kind: "version",
         key,
         path: c.path,
         version: v,
         change: c.kind,
+        from: c.from ?? null,
         pruned: c.pruned,
         labels: c.labels,
-        parents: inherited.get(c.path) ?? [],
+        parents: inherited.get(before) ?? [],
         number: null,
         branches: [],
         onCurrent: false,
@@ -149,10 +168,12 @@ export function buildLanes(
         col: 0,
         row: 0,
       });
+      if (before !== c.path) inherited.delete(before);
       inherited.set(c.path, [key]);
     }
     latest.set(v.id, inherited);
   }
+  for (const f of files) if (f.from) join(f.from, f.path);
 
   const current = branches.find((b) => b.current);
   const atHead = (current?.head && latest.get(current.head)) || new Map<string, string[]>();
@@ -174,19 +195,29 @@ export function buildLanes(
       return rank(a) - rank(b) || time(b) - time(a);
     });
 
-  const byPath = new Map<string, SongVersion[]>();
-  for (const node of nodes.values()) {
-    const list = byPath.get(node.path);
-    if (list) list.push(node);
-    else byPath.set(node.path, [node]);
-  }
+  // Each lane: one song, all its names, its versions oldest first.
+  const groups = new Map<string, { names: Set<string>; list: SongVersion[] }>();
+  const group = (path: string) => {
+    const id = song(path);
+    let g = groups.get(id);
+    if (!g) groups.set(id, (g = { names: new Set(), list: [] }));
+    g.names.add(path);
+    return g;
+  };
+  for (const node of nodes.values()) group(node.path).list.push(node);
+  for (const f of files) group(f.path);
   const fileByPath = new Map(files.map((f) => [f.path, f]));
-  const paths = new Set([...byPath.keys(), ...fileByPath.keys()]);
+  /** The latest versions of the song (under any of its names) in version `id`. */
+  const tipsAt = (id: string | null | undefined, names: Set<string>) => {
+    const at = id ? latest.get(id) : undefined;
+    return at ? [...names].flatMap((n) => at.get(n) ?? []) : [];
+  };
 
   const lanes: Lane[] = [];
-  for (const path of paths) {
-    const list = byPath.get(path) ?? []; // oldest first: parents before children
-    const file = fileByPath.get(path);
+  for (const { names, list } of groups.values()) {
+    // Named as the file is now, else as its latest version.
+    const file = [...names].map((n) => fileByPath.get(n)).find((f) => f !== undefined);
+    const path = file?.path ?? list[list.length - 1].path;
 
     let n = 0;
     for (const node of list) {
@@ -208,7 +239,7 @@ export function buildLanes(
     };
     const tips = new Map<string, Branch[]>();
     for (const b of branchOrder) {
-      for (const key of latest.get(b.head!)?.get(path) ?? []) {
+      for (const key of tipsAt(b.head, names)) {
         claim(key);
         tips.set(key, [...(tips.get(key) ?? []), b]);
       }
@@ -221,7 +252,7 @@ export function buildLanes(
       for (const [key, owners] of tips) nodes.get(key)!.branches = owners;
     }
 
-    const tip = atHead.get(path) ?? [];
+    const tip = tipsAt(current?.head, names);
     for (const key of tip) {
       const node = nodes.get(key)!;
       node.inFolder = file?.status === "saved" && node.change !== "deleted";
@@ -253,21 +284,17 @@ export function buildLanes(
       branchNames: file
         ? []
         : branchOrder
-            .filter((b) => {
-              const keys = latest.get(b.head!)?.get(path) ?? [];
-              return keys.some((k) => nodes.get(k)?.change !== "deleted");
-            })
+            .filter((b) => tipsAt(b.head, names).some((k) => nodes.get(k)?.change !== "deleted"))
             .map((b) => b.name),
     });
   }
 
   const rank = new Map(order.map((p, i) => [p, i]));
-  const group = laneGroup;
   return lanes.sort((a, b) => {
     const ra = rank.get(a.path);
     const rb = rank.get(b.path);
     return (
-      group(a) - group(b) ||
+      laneGroup(a) - laneGroup(b) ||
       (ra !== undefined && rb !== undefined ? ra - rb : ra !== undefined ? -1 : rb !== undefined ? 1 : 0) ||
       naturalCompare(a.path, b.path)
     );

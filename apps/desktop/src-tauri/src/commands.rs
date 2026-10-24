@@ -157,6 +157,13 @@ fn auto_message(change: &takes_core::Change) -> String {
         takes_core::ChangeKind::Added => format!("Новый файл «{name}»"),
         takes_core::ChangeKind::Modified => format!("Новая версия «{name}»"),
         takes_core::ChangeKind::Deleted => format!("Удалён «{name}»"),
+        takes_core::ChangeKind::Renamed => {
+            let old = change.from.as_deref().unwrap_or_default();
+            format!(
+                "Переименован «{}» → «{name}»",
+                old.rsplit('/').next().unwrap_or(old)
+            )
+        }
     }
 }
 
@@ -482,6 +489,12 @@ pub async fn merge(
 }
 
 // ---- files --------------------------------------------------------------------
+
+/// Renames or moves a file in the project folder; saved, it keeps its history.
+#[tauri::command]
+pub async fn rename_file(root: String, from: String, to: String) -> CmdResult<()> {
+    blocking(move || Ok(open(&root)?.rename_file(&from, &to)?)).await
+}
 
 /// Puts a file back as it was in `rev`, in place or as a copy at `dest`.
 #[tauri::command]
