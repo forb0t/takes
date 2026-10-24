@@ -23,7 +23,7 @@ mod import;
 mod meta;
 mod settings;
 mod sync;
-mod transfer;
+mod variants;
 pub use cleanup::Cleanup;
 pub use import::Imported;
 pub use meta::FileMeta;
@@ -31,7 +31,7 @@ pub use sync::{
     Blocked, Diverged, SyncPhase, SyncProgress, SyncReport, SyncState, find_remote_projects,
     is_remote_project,
 };
-pub use transfer::Transfer;
+pub use variants::TAKE_PREFIX;
 
 pub const DEFAULT_BRANCH: &str = "main";
 

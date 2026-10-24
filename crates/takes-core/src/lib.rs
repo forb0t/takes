@@ -33,7 +33,7 @@ pub use model::{
 pub use remote::{FolderStorage, RemoteConfig, Storage, WebDavStorage};
 pub use repo::{
     Blocked, Cleanup, DEFAULT_BRANCH, Diverged, FileMeta, Imported, Repo, SyncPhase, SyncProgress,
-    SyncReport, SyncState, Transfer, find_remote_projects, is_remote_project, validate_name,
+    SyncReport, SyncState, TAKE_PREFIX, find_remote_projects, is_remote_project, validate_name,
 };
 pub use store::hash_file;
 pub use text::decode_text;

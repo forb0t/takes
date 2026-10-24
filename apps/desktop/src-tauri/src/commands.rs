@@ -271,6 +271,7 @@ pub async fn history_graph(root: String) -> CmdResult<Vec<GraphVersionDto>> {
                             let entry = tree.get(&c.path);
                             ChangeDto {
                                 size: entry.map(|e| e.size),
+                                blob: entry.map(|e| e.blob.to_hex()),
                                 pruned: entry.is_some_and(|e| pruned.contains(&e.blob)),
                                 labels: labels(&meta, entry.map(|e| e.blob)),
                                 ..c.into()
@@ -344,6 +345,12 @@ pub async fn files(root: String, rev: String) -> CmdResult<Vec<FileDto>> {
 #[tauri::command]
 pub async fn shared_setting(root: String, key: String) -> CmdResult<Option<String>> {
     blocking(move || Ok(open(&root)?.shared_setting(&key)?)).await
+}
+
+/// The shared settings whose keys start with `prefix`.
+#[tauri::command]
+pub async fn shared_settings(root: String, prefix: String) -> CmdResult<HashMap<String, String>> {
+    blocking(move || Ok(open(&root)?.shared_settings(&prefix)?.into_iter().collect())).await
 }
 
 #[tauri::command]
@@ -450,67 +457,42 @@ pub async fn create_branch(
     .await
 }
 
-/// A new branch with a file from outside as its version of `path`: another
-/// take of a song. The current branch and the folder stay as they are.
+/// Saves a file from outside as a version of a song's variant after version
+/// `parent`, beside the folder: the folder keeps what it has.
 #[tauri::command]
-pub async fn branch_with_file(
+pub async fn save_take(
     root: String,
-    name: String,
-    from: Option<String>,
     source: String,
     path: String,
+    parent: String,
+    variant: String,
 ) -> CmdResult<String> {
     blocking(move || {
-        let mut repo = open(&root)?;
         let song = path.rsplit('/').next().unwrap_or(&path);
-        let start = from.as_deref().unwrap_or("HEAD");
-        let known = repo.head()?.is_some() && repo.file_at(start, &path).is_ok();
-        let message = if known {
-            let file = Path::new(&source).file_name().map(|n| n.to_string_lossy());
-            format!("Другой вариант «{song}»: {}", file.unwrap_or_default())
-        } else {
-            format!("Новый файл «{song}»")
-        };
-        let id = repo.branch_with_file(
-            name.trim(),
-            from.as_deref(),
-            Path::new(&source),
-            &path,
-            &message,
-        )?;
+        let file = Path::new(&source).file_name().map(|n| n.to_string_lossy());
+        let message = format!("«{song}», ветка «{variant}»: {}", file.unwrap_or_default());
+        let id = open(&root)?.save_take(Path::new(&source), &path, &parent, &message)?;
         Ok(id.to_hex())
     })
     .await
 }
 
-/// Moves a version of a file from one branch to another.
+/// Brings a version of a song (called `from` there) into the folder as
+/// `path`, saved as its next version there; none if it is there already.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn move_version(
+pub async fn use_take(
     root: String,
     rev: String,
-    path: String,
-    to: String,
-    to_path: String,
     from: String,
-    from_path: Option<String>,
-) -> CmdResult<()> {
+    path: String,
+    variant: String,
+) -> CmdResult<Option<String>> {
     blocking(move || {
-        let song = to_path.rsplit('/').next().unwrap_or(&to_path);
-        let transfer = takes_core::Transfer {
-            rev: &rev,
-            path: &path,
-            to: &to,
-            to_path: &to_path,
-            from: &from,
-            from_path: from_path.as_deref(),
-        };
-        open(&root)?.move_version(
-            &transfer,
-            &format!("«{song}» перенесён из ветки «{from}»"),
-            &format!("«{song}» перенесён в ветку «{to}»"),
-        )?;
-        Ok(())
+        let song = path.rsplit('/').next().unwrap_or(&path);
+        let message = format!("«{song}»: в папке ветка «{variant}»");
+        Ok(open(&root)?
+            .use_take(&rev, &from, &path, &message)?
+            .map(|id| id.to_hex()))
     })
     .await
 }

@@ -13,6 +13,8 @@ export interface Change {
   labels: string[];
   /** The earlier path of a renamed file. */
   from?: string | null;
+  /** The new content's hash; only in the project diagram's versions. */
+  blob?: string | null;
 }
 
 export interface Snapshot {
@@ -264,6 +266,8 @@ export const api = {
   removedFiles: (root: string) => invoke<RemovedFile[]>("removed_files", { root }),
   /** A setting every device of the project shares, e.g. "songs.order". */
   sharedSetting: (root: string, key: string) => invoke<string | null>("shared_setting", { root, key }),
+  sharedSettings: (root: string, prefix: string) =>
+    invoke<Record<string, string>>("shared_settings", { root, prefix }),
   setSharedSetting: (root: string, key: string, value: string) =>
     invoke<void>("set_shared_setting", { root, key, value }),
   stats: (root: string) => invoke<Stats>("stats", { root }),
@@ -275,14 +279,12 @@ export const api = {
   switchBranch: (root: string, name: string) => invoke<void>("switch_branch", { root, name }),
   createBranch: (root: string, name: string, from: string | null, switchTo: boolean) =>
     invoke<void>("create_branch", { root, name, from, switchTo }),
-  /** A new branch with a file from outside as its version of `path`; you stay where you are. */
-  branchWithFile: (root: string, name: string, from: string | null, source: string, path: string) =>
-    invoke<string>("branch_with_file", { root, name, from, source, path }),
-  /** Moves a version of a file to another branch; the branch it leaves saves its removal. */
-  moveVersion: (
-    root: string,
-    move: { rev: string; path: string; to: string; toPath: string; from: string; fromPath: string | null },
-  ) => invoke<void>("move_version", { root, ...move }),
+  /** Saves a file from outside as a version of `path` after version `parent`, beside the folder. */
+  saveTake: (root: string, source: string, path: string, parent: string, variant: string) =>
+    invoke<string>("save_take", { root, source, path, parent, variant }),
+  /** Brings a version into the folder as `path`, saved there; null if it is there already. */
+  useTake: (root: string, rev: string, from: string, path: string, variant: string) =>
+    invoke<string | null>("use_take", { root, rev, from, path, variant }),
   deleteBranch: (root: string, name: string) => invoke<void>("delete_branch", { root, name }),
   createTag: (root: string, name: string, rev: string) => invoke<void>("create_tag", { root, name, rev }),
   deleteTag: (root: string, name: string) => invoke<void>("delete_tag", { root, name }),

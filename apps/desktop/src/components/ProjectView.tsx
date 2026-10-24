@@ -16,7 +16,6 @@ import {
 import { Icon, PromptDialog, useToast } from "../ui";
 import { formatSize, prettyPath } from "../util";
 import { BlueprintTab } from "./BlueprintTab";
-import { BranchMenu } from "./BranchMenu";
 import { CleanupDialog } from "./CleanupDialog";
 import { FilesTab, projectFiles, type Drafts } from "./FilesTab";
 import { HistoryTab } from "./HistoryTab";
@@ -54,7 +53,6 @@ export function ProjectView({ root }: { root: string }) {
   const [updating, setUpdating] = useState(false);
   const [importing, setImporting] = useState<Importing | null>(null);
   const [dropping, setDropping] = useState(false);
-  const [mergeBranch, setMergeBranch] = useState<string | null>(null);
   /** A file to show in the Files tab (e.g. from the diagram). */
   const [focus, setFocus] = useState<{ path: string; n: number } | null>(null);
   const [addMenu, setAddMenu] = useState(false);
@@ -233,6 +231,15 @@ export function ProjectView({ root }: { root: string }) {
     if (typeof picked === "string") setImporting({ sources: [picked], asPath: path });
   }
 
+  async function backToMain() {
+    try {
+      await api.switchBranch(root, "main");
+      refreshAll();
+    } catch (e) {
+      toast(errorText(e), "error");
+    }
+  }
+
   function openFile(path: string) {
     setFocus((f) => ({ path, n: (f?.n ?? 0) + 1 }));
     setTab("files");
@@ -298,7 +305,6 @@ export function ProjectView({ root }: { root: string }) {
               </div>
             )}
           </div>
-          <BranchMenu overview={overview} onChanged={refreshAll} />
           <SyncControl root={root} projectName={overview.name} state={syncState} onSynced={refreshAll} />
         </div>
       </header>
@@ -307,11 +313,10 @@ export function ProjectView({ root }: { root: string }) {
         <div key={d.rev} className="banner">
           <Icon name="merge" size={15} />
           <span>
-            Ветка «{d.branch}» изменилась и здесь, и на устройстве «{d.device}». Слейте версии, чтобы продолжить
-            вместе.
+            Проект изменился и здесь, и на устройстве «{d.device}». Объедините версии, чтобы продолжить вместе.
           </span>
           <button className="btn btn-small" onClick={() => setMergeFrom(d)}>
-            Слить…
+            Объединить…
           </button>
         </div>
       ))}
@@ -320,19 +325,32 @@ export function ProjectView({ root }: { root: string }) {
           <div className="banner">
             <Icon name="download" size={15} />
             <span>
-              С другого устройства пришла новая версия «{overview.branch}», но здесь есть несохранённые изменения.
-              Сохраните или отмените их, чтобы получить её.
+              С другого устройства пришли новые версии, но здесь есть несохранённые изменения. Сохраните или
+              отмените их, чтобы получить их.
             </span>
           </div>
         ) : (
           <div className="banner">
             <Icon name="download" size={15} />
-            <span>С другого устройства пришла новая версия «{overview.branch}».</span>
+            <span>С другого устройства пришли новые версии.</span>
             <button className="btn btn-small" disabled={updating} onClick={updateFiles}>
               {updating ? "Обновляю…" : "Обновить файлы"}
             </button>
           </div>
         ))}
+
+      {overview.branch !== "main" && overview.branches.some((b) => b.name === "main" && b.head) && (
+        <div className="banner">
+          <Icon name="branch" size={15} />
+          <span>
+            Папка сейчас на старой ветке проекта «{overview.branch}». Теперь ветки есть у каждого трека, а папка
+            проекта одна.
+          </span>
+          <button className="btn btn-small" onClick={backToMain}>
+            Вернуться к основной папке
+          </button>
+        </div>
+      )}
 
       <nav className="tabs">
         <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>
@@ -374,7 +392,6 @@ export function ProjectView({ root }: { root: string }) {
             onAddFiles={pickToAdd}
             onOpenFile={openFile}
             onUploadVersion={uploadVersion}
-            onMerge={setMergeBranch}
           />
         )}
         {tab === "history" && <HistoryTab overview={overview} onChanged={refreshAll} />}
@@ -393,15 +410,6 @@ export function ProjectView({ root }: { root: string }) {
           remoteSources={syncState?.diverged ?? []}
           initialSource={mergeFrom.rev}
           onClose={() => setMergeFrom(null)}
-          onMerged={refreshAll}
-        />
-      )}
-      {mergeBranch && (
-        <MergeDialog
-          overview={overview}
-          remoteSources={syncState?.diverged ?? []}
-          initialSource={mergeBranch}
-          onClose={() => setMergeBranch(null)}
           onMerged={refreshAll}
         />
       )}

@@ -14,33 +14,24 @@ import {
   splitPath,
   type Label,
 } from "../util";
-import { BranchDialog } from "./BranchDialog";
 import { useFileActions } from "./useFileActions";
 
+/** The history of the project folder: every saved version, newest first. */
 export function HistoryTab({ overview, onChanged }: { overview: Overview; onChanged: () => void }) {
   const root = overview.root;
-  const [view, setView] = useState(overview.branch);
   const [log, setLog] = useState<Snapshot[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const labels = useMemo(() => labelsById(overview), [overview]);
-  const branchesKey = overview.branches.map((b) => `${b.name}@${b.head}`).join();
-
-  useEffect(() => setView(overview.branch), [overview.branch]);
-  // The branch on screen was deleted (here or on another device): show the current one.
-  useEffect(() => {
-    if (!overview.branches.some((b) => b.name === view && b.head)) setView(overview.branch);
-  }, [overview.branches, overview.branch, view]);
 
   useEffect(() => {
     let alive = true;
-    const viewed = overview.branches.find((b) => b.name === view);
-    if (!viewed?.head) {
+    if (!overview.head) {
       setLog([]);
       return;
     }
     api
-      .log(root, view)
+      .log(root, null)
       .then((list) => {
         if (!alive) return;
         setLog(list);
@@ -51,34 +42,26 @@ export function HistoryTab({ overview, onChanged }: { overview: Overview; onChan
     return () => {
       alive = false;
     };
-  }, [root, view, branchesKey]);
+  }, [root, overview.head]);
 
-  if (!overview.head && overview.branches.every((b) => !b.head)) {
+  if (!overview.head) {
     return (
       <div className="center">
         <Empty icon="restore" title="Пока нет версий">
-          Сохраните первую версию на вкладке «Изменения». После этого здесь появится история.
+          Сохраните первую версию на вкладке «Файлы». После этого здесь появится история.
         </Empty>
       </div>
     );
   }
 
   const selected = log?.find((s) => s.id === selectedId) ?? null;
-  const withHistory = overview.branches.filter((b) => b.head);
 
   return (
     <div className="split">
       <div className="split-left">
         <div className="list-head">
-          <span className="muted">Ветка</span>
-          <select value={view} onChange={(e) => setView(e.target.value)}>
-            {withHistory.map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.name}
-                {b.current ? " (текущая)" : ""}
-              </option>
-            ))}
-          </select>
+          <span className="muted">История папки проекта</span>
+          <span className="grow" />
           {log && <span className="muted">{log.length} верс.</span>}
         </div>
         {error && <div className="error-text pad">{error}</div>}
@@ -153,7 +136,7 @@ export function VersionDetail({
   const actions = useFileActions(root, onChanged);
   const [changes, setChanges] = useState<Change[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"tag" | "branch" | null>(null);
+  const [tagging, setTagging] = useState(false);
   const [zipping, setZipping] = useState(false);
 
   useEffect(() => {
@@ -205,11 +188,8 @@ export function VersionDetail({
         </div>
         <Labels labels={labels} />
         <div className="detail-actions">
-          <button className="btn" onClick={() => setDialog("tag")}>
+          <button className="btn" onClick={() => setTagging(true)}>
             <Icon name="tag" /> Отметить версию
-          </button>
-          <button className="btn" onClick={() => setDialog("branch")}>
-            <Icon name="branch" /> Новая ветка отсюда
           </button>
           <button
             className="btn"
@@ -291,7 +271,7 @@ export function VersionDetail({
         })}
       </div>
 
-      {dialog === "tag" && (
+      {tagging && (
         <PromptDialog
           title="Отметить версию"
           label="Название метки"
@@ -302,15 +282,7 @@ export function VersionDetail({
             await api.createTag(root, name, id);
             onChanged();
           }}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog === "branch" && (
-        <BranchDialog
-          overview={overview}
-          from={{ rev: id, label }}
-          onClose={() => setDialog(null)}
-          onCreated={onChanged}
+          onClose={() => setTagging(false)}
         />
       )}
     </div>

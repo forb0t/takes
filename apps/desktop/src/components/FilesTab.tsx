@@ -175,7 +175,7 @@ export function FilesTab({
       const ids = await api.commit(root, [], drafts.all);
       for (const f of unsaved) drafts.set(f.path, "");
       toast(
-        `Сохранено ${ids.length} ${plural(ids.length, "версия", "версии", "версий")} в «${overview.branch}» — по одной на файл`,
+        `Сохранено ${ids.length} ${plural(ids.length, "версия", "версии", "версий")} — по одной на файл`,
         "ok",
       );
       onChanged();
@@ -424,8 +424,8 @@ export function FileDetail({
       drafts.set(path, "");
       toast(
         pending === "deleted"
-          ? `Удаление «${name}» сохранено в «${overview.branch}»`
-          : `Версия ${short(id)} «${name}» сохранена в «${overview.branch}»`,
+          ? `Удаление «${name}» сохранено`
+          : `Версия ${short(id)} «${name}» сохранена`,
         "ok",
       );
       onChanged();
@@ -564,7 +564,7 @@ export function FileDetail({
           />
           <div className="pending-bar">
             <span className="muted">
-              → ветка «{overview.branch}»<span className="kbd">Ctrl+Enter</span>
+              Сохранить: <span className="kbd">Ctrl+Enter</span>
             </span>
             {pending === "modified" && (
               <button className="btn btn-ghost" onClick={() => actions.discard(path)}>

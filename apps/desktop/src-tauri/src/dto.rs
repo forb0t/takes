@@ -24,6 +24,8 @@ pub struct ChangeDto {
     pub kind: &'static str,
     /// Size of the new content; absent for deletions and plain status.
     pub size: Option<u64>,
+    /// The new content's hash, where it is known.
+    pub blob: Option<String>,
     /// The content was removed by cleanup: it cannot be played or restored.
     pub pruned: bool,
     /// Labels on the new content ("мастер", …).
@@ -39,6 +41,7 @@ impl From<&Change> for ChangeDto {
             kind: kind(c.kind),
             from: c.from.clone(),
             size: None,
+            blob: None,
             pruned: false,
             labels: Vec::new(),
         }

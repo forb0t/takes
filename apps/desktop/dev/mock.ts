@@ -273,10 +273,12 @@ mockIPC(
           : ["/home/me/Downloads/Ночь_final_v7.wav", "/home/me/Downloads/Stems"];
       case "plugin:dialog|ask":
         return true;
-      case "branch_with_file":
+      case "save_take":
         return id(40);
-      case "move_version":
-        return null;
+      case "use_take":
+        return id(41);
+      case "shared_settings":
+        return Object.fromEntries([...settings].filter(([k]) => k.startsWith(a.prefix as string)));
       case "history_graph":
         return params.has("empty") ? [] : graph;
       case "commit":

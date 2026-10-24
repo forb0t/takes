@@ -3,6 +3,8 @@
 //! synced as is; the latest one per key wins, so devices agree without
 //! coordination.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{OptionalExtension, params};
 
 use super::{Repo, now_ns};
@@ -42,6 +44,24 @@ impl Repo {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// The current values of the shared settings whose keys start with `prefix`.
+    pub fn shared_settings(&self, prefix: &str) -> Result<BTreeMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value FROM setting_events WHERE substr(key, 1, length(?1)) = ?1
+             ORDER BY at, uid",
+        )?;
+        let rows = stmt.query_map([prefix], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        // Later changes come last and win.
+        let mut values = BTreeMap::new();
+        for row in rows {
+            let (key, value) = row?;
+            values.insert(key, value);
+        }
+        Ok(values)
     }
 
     /// Changes a shared setting here; other devices take it on their next

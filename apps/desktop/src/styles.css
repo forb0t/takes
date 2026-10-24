@@ -2721,6 +2721,20 @@ input[type="checkbox"]:disabled {
   font-weight: 600;
 }
 
+.bp-dock-branch.new {
+  color: var(--muted);
+}
+
+.branch-file {
+  justify-content: flex-start;
+}
+
+.branch-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bp-dock-branch.over {
   border: 1.5px solid var(--accent);
   background: var(--accent-soft);

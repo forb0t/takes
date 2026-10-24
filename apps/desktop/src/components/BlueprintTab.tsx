@@ -5,6 +5,7 @@ import {
   NODE_H,
   NODE_W,
   PIN_Y,
+  SONG_BRANCHES,
   SONG_KEY,
   SONG_W,
   buildLanes,
@@ -13,6 +14,7 @@ import {
   nodeKey,
   placeLanes,
   previousVersion,
+  shortId,
   songHue,
   wire,
   type Lane,
@@ -21,15 +23,16 @@ import {
   type PlacedLane,
   type Point,
   type Rect,
+  type SongBranches,
   type SongVersion,
   type WorkNode,
 } from "../blueprint";
 import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast, type IconName } from "../ui";
 import { baseName, formatDate, plural, previewKind, short, splitPath } from "../util";
-import { BranchDialog } from "./BranchDialog";
 import { FileDetail, type Drafts, type ProjectFile } from "./FilesTab";
 import { FileMetaDialog } from "./FileMetaDialog";
+import { SongBranchDialog } from "./SongBranchDialog";
 import { useFileActions } from "./useFileActions";
 
 /** Shared by every device of the project: the song order, where things lie, the tiles. */
@@ -48,7 +51,8 @@ type Selection = { path: string; key: string | null; draft: boolean; n: number }
 type MenuItem = { label: string; icon: IconName; run: () => void; danger?: boolean };
 type Menu = { x: number; y: number; items: MenuItem[] };
 type Meta = { path: string; rev: string; label: string };
-type BranchStart = { from?: { rev: string; label: string }; song?: string };
+/** A new branch of a song: from the folder's version ("HEAD") or a given one. */
+type BranchStart = { lane: Lane; parent: string; start: string };
 
 /** Something on the canvas that is not a file: a note, a song to come, a frame grouping things. */
 interface Tile {
@@ -109,6 +113,9 @@ function noSelecting(on: boolean) {
   document.documentElement.classList.toggle("no-select", on);
   if (on) window.getSelection()?.removeAllRanges();
 }
+
+/** The dock's place for a branch not made yet. */
+const NEW_BRANCH = "";
 
 const snap = (v: number) => Math.round(v / GRID) * GRID;
 const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -208,7 +215,6 @@ export function BlueprintTab({
   onAddFiles,
   onOpenFile,
   onUploadVersion,
-  onMerge,
 }: {
   overview: Overview;
   files: ProjectFile[] | null;
@@ -220,7 +226,6 @@ export function BlueprintTab({
   onAddFiles: (what: "files" | "folder") => void;
   onOpenFile: (path: string) => void;
   onUploadVersion: (path: string) => void;
-  onMerge: (branch: string) => void;
 }) {
   const root = overview.root;
   const toast = useToast();
@@ -231,6 +236,9 @@ export function BlueprintTab({
   const [order, setOrder] = useState<string[]>([]);
   const [layout, setLayout] = useState<Layout>({ lanes: {}, nodes: {} });
   const [tiles, setTiles] = useState<Tile[]>([]);
+  const [songBranches, setSongBranches] = useState(new Map<string, SongBranches>());
+  /** A version going to a new branch of its song, waiting for the name. */
+  const [naming, setNaming] = useState<{ lane: Lane; node: SongVersion } | null>(null);
   const [savedView] = useState(() => loadView(root));
   const [view, setView] = useState<View>(savedView ?? { x: 32, y: 32, zoom: 1 });
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -267,9 +275,22 @@ export function BlueprintTab({
   // Another device may have moved things; a sync reloads the overview.
   useEffect(() => {
     let alive = true;
-    Promise.all([ORDER_KEY, LAYOUT_KEY, TILES_KEY].map((key) => api.sharedSetting(root, key)))
-      .then(([orderValue, layoutValue, tilesValue]) => {
+    Promise.all([
+      Promise.all([ORDER_KEY, LAYOUT_KEY, TILES_KEY].map((key) => api.sharedSetting(root, key))),
+      api.sharedSettings(root, SONG_BRANCHES),
+    ])
+      .then(([[orderValue, layoutValue, tilesValue], songs]) => {
         if (!alive || Date.now() - localEdit.current < SETTLE_MS) return;
+        const branches = new Map<string, SongBranches>();
+        for (const [key, value] of Object.entries(songs)) {
+          try {
+            const map: unknown = JSON.parse(value);
+            if (map && typeof map === "object") branches.set(key.slice(SONG_BRANCHES.length), map as SongBranches);
+          } catch {
+            // Unreadable: the song's versions fall back to where they came from.
+          }
+        }
+        setSongBranches(branches);
         try {
           const list: unknown = JSON.parse(orderValue ?? "[]");
           if (Array.isArray(list)) setOrder(list.filter((p): p is string => typeof p === "string"));
@@ -287,8 +308,9 @@ export function BlueprintTab({
 
   const removedPaths = useMemo(() => new Set(removed.map((r) => r.path)), [removed]);
   const lanes = useMemo(
-    () => (versions && files ? buildLanes(versions, overview.branches, files, removedPaths, order) : null),
-    [versions, files, overview.branches, removedPaths, order],
+    () =>
+      versions && files ? buildLanes(versions, overview.branches, files, removedPaths, order, songBranches) : null,
+    [versions, files, overview.branches, removedPaths, order, songBranches],
   );
   const visible = useMemo(
     () => lanes?.filter((l) => showRemoved || l.status !== "removed") ?? [],
@@ -543,9 +565,11 @@ export function BlueprintTab({
     if (d.kind === "node") {
       const p = basePlaced.find((x) => x.lane.path === d.lane);
       if (!p) return;
-      if (d.branch) {
+      if (d.branch !== null) {
         const n = p.lane.nodes.find((x) => nodeKey(x) === d.key);
-        if (n?.kind === "version") moveToBranch(p.lane, n, d.branch);
+        if (n?.kind !== "version") return;
+        if (d.branch === NEW_BRANCH) setNaming({ lane: p.lane, node: n });
+        else moveToBranch(p.lane, n, d.branch);
         return;
       }
       const was = p.at.get(d.key)!;
@@ -605,7 +629,7 @@ export function BlueprintTab({
 
   function dragNode(e: React.PointerEvent, lane: Lane, key: string) {
     const n = lane.nodes.find((x) => nodeKey(x) === key);
-    const movable = n?.kind === "version" && n.owner !== null && n.change !== "deleted" && !n.pruned;
+    const movable = n?.kind === "version" && n.change !== "deleted";
     beginDrag(e, (by, ev) => {
       // Over a branch of the bar that shows up: the version goes there.
       const target = movable
@@ -724,43 +748,70 @@ export function BlueprintTab({
   });
   const nowTrack = (path: string): Track => ({ root, rev: null, path, label: "Сейчас на диске (не сохранено)" });
 
-  async function switchTo(name: string) {
+  /** Keeps a song's branches; the versions it does not name follow those they were made from. */
+  function saveSongBranches(lane: Lane, change: SongBranches) {
+    const next = { ...lane.branchOf, ...change };
+    setSongBranches((all) => new Map(all).set(lane.id, next));
+    saveSetting(SONG_BRANCHES + lane.id, next);
+  }
+
+  /** A version goes to another branch of its song: only where it is drawn changes. */
+  function moveToBranch(lane: Lane, n: SongVersion, to: string) {
+    if (n.branch === to) return;
+    saveSongBranches(lane, { [shortId(n.version.id)]: to });
+    // It takes its place in the other row, wherever it was put by hand.
+    const own = lane.names.map((name) => layout.nodes[name]).find((m) => m !== undefined);
+    if (own?.[n.key]) {
+      const rest = { ...own };
+      delete rest[n.key];
+      saveLayout({ ...layout, nodes: { ...layout.nodes, [lane.path]: rest } });
+    }
+    toast(`Версия ${n.number ?? ""} «${splitPath(lane.path).name}» теперь в ветке «${to}»`, "ok");
+  }
+
+  /** Puts a version into the folder, saved there; its branch becomes the song's branch in the folder. */
+  async function useVersion(lane: Lane, n: SongVersion) {
+    const name = splitPath(lane.path).name;
+    if (lane.status !== "saved" && lane.status !== "deleted") {
+      toast(`Сначала сохраните или отмените изменения «${name}»: они не должны потеряться.`, "error");
+      return;
+    }
     try {
-      await api.switchBranch(root, name);
-      toast(`Вы на ветке «${name}»`, "ok");
+      const id = await api.useTake(root, n.version.id, n.path, lane.path, n.branch);
+      if (id) saveSongBranches(lane, { [shortId(id)]: n.branch });
+      toast(`В папке «${name}» из ветки «${n.branch}»`, "ok");
       onChanged();
     } catch (e) {
       toast(errorText(e), "error");
     }
   }
 
-  /** The version goes to branch `to`; the branch it is drawn on saves its removal. */
-  async function moveToBranch(lane: Lane, n: SongVersion, to: string) {
-    const from = n.owner;
-    if (!from || from === to) return;
-    const name = splitPath(lane.path).name;
-    const fromPath = lane.tipPaths[from] ?? null;
-    if (from === overview.branch && fromPath) {
-      const ok = await ask(
-        `«${name}» перенесётся в ветку «${to}» и уйдёт из папки проекта. В истории ветки «${from}» он останется.`,
-        { title: "Перенести в другую ветку?", kind: "warning", okLabel: "Перенести", cancelLabel: "Отмена" },
-      );
-      if (!ok) return;
-    }
+  /** A file from disk as the next version of a branch that is not in the folder. */
+  async function addToBranch(lane: Lane, n: SongVersion) {
+    const source = await open({ multiple: false, title: `Новая версия «${splitPath(lane.path).name}», ветка «${n.branch}»` });
+    if (typeof source !== "string") return;
     try {
-      await api.moveVersion(root, {
-        rev: n.version.id,
-        path: n.path,
-        to,
-        toPath: lane.tipPaths[to] ?? n.path,
-        from,
-        fromPath,
-      });
-      toast(`«${name}» перенесён из ветки «${from}» в «${to}»`, "ok");
+      const id = await api.saveTake(root, source, lane.path, n.version.id, n.branch);
+      saveSongBranches(lane, { [shortId(id)]: n.branch });
+      toast(`Версия сохранена в ветке «${n.branch}»`, "ok");
       onChanged();
     } catch (e) {
       toast(errorText(e), "error");
     }
+  }
+
+  /** A new branch of a song whose first version is a file from disk. */
+  async function createBranch(start: BranchStart, name: string, source: string, intoFolder: boolean) {
+    const { lane, parent } = start;
+    const id = await api.saveTake(root, source, lane.path, parent, name);
+    const change: SongBranches = { [shortId(id)]: name };
+    if (intoFolder) {
+      const used = await api.useTake(root, id, lane.path, lane.path, name);
+      if (used) change[shortId(used)] = name;
+    }
+    saveSongBranches(lane, change);
+    toast(`У «${splitPath(lane.path).name}» новая ветка «${name}»`, "ok");
+    onChanged();
   }
 
   async function quickSave(w: WorkNode) {
@@ -817,11 +868,15 @@ export function BlueprintTab({
     if (usable) {
       items.push(
         // Under the song's current name, even if it was called otherwise then.
-        {
-          label: "Вернуть эту версию в папку",
-          icon: "restore",
-          run: () => actions.restore(lane.path, n.version.id, n.path),
-        },
+        ...(n.inFolder
+          ? []
+          : [
+              {
+                label: `Положить в папку (ветка «${n.branch}»)`,
+                icon: "restore" as const,
+                run: () => useVersion(lane, n),
+              },
+            ]),
         {
           label: "Положить копию рядом",
           icon: "copy",
@@ -834,29 +889,28 @@ export function BlueprintTab({
         },
       );
     }
-    items.push(
-      {
-        label: "Новая ветка отсюда…",
-        icon: "branch",
-        run: () => setBranching({ from: { rev: n.version.id, label: `версии ${short(n.version.id)}` }, song: lane.path }),
-      },
-      {
-        label: "Отметить версию…",
-        icon: "tag",
-        run: () => setTagging({ rev: n.version.id, label: `версии ${short(n.version.id)}` }),
-      },
-    );
-    if (usable && n.owner) {
-      for (const b of overview.branches.filter((b) => b.head && b.name !== n.owner)) {
+    const branch = lane.branches.find((b) => b.name === n.branch);
+    if (usable && branch && branch.head === n.key && !branch.active) {
+      items.push({ label: `Новая версия в ветку «${n.branch}»…`, icon: "download", run: () => addToBranch(lane, n) });
+    }
+    if (n.change !== "deleted") {
+      for (const b of lane.branches.filter((b) => b.name !== n.branch)) {
         items.push({ label: `Перенести в ветку «${b.name}»`, icon: "branch", run: () => moveToBranch(lane, n, b.name) });
       }
+      items.push({ label: "Перенести в новую ветку…", icon: "branch", run: () => setNaming({ lane, node: n }) });
     }
-    for (const b of n.branches.filter((b) => !b.current)) {
-      items.push(
-        { label: `Перейти на ветку «${b.name}»`, icon: "check", run: () => switchTo(b.name) },
-        { label: `Слить «${b.name}» в «${overview.branch}»…`, icon: "merge", run: () => onMerge(b.name) },
-      );
+    if (usable) {
+      items.push({
+        label: "Новая ветка от этой версии…",
+        icon: "plus",
+        run: () => setBranching({ lane, parent: n.version.id, start: `версии ${n.number}` }),
+      });
     }
+    items.push({
+      label: "Отметить версию…",
+      icon: "tag",
+      run: () => setTagging({ rev: n.version.id, label: `версии ${short(n.version.id)}` }),
+    });
     items.push({ label: "Открыть во вкладке «Файлы»", icon: "doc", run: () => onOpenFile(n.path) });
     return items;
   }
@@ -902,7 +956,11 @@ export function BlueprintTab({
     } else if (lane.status !== "elsewhere") {
       items.push(
         { label: "Загрузить новую версию…", icon: "download", run: () => onUploadVersion(lane.path) },
-        { label: "Другой вариант в новой ветке…", icon: "branch", run: () => setBranching({ song: lane.path }) },
+        {
+          label: "Новая ветка из файла…",
+          icon: "branch",
+          run: () => setBranching({ lane, parent: "HEAD", start: "версии, которая сейчас в папке" }),
+        },
       );
     }
     if (lane.status !== "deleted" && lane.status !== "removed" && lane.status !== "elsewhere") {
@@ -933,7 +991,6 @@ export function BlueprintTab({
       { label: "Добавить песни (файлы)…", icon: "plus", run: () => onAddFiles("files") },
       { label: "Добавить папку…", icon: "folder", run: () => onAddFiles("folder") },
     ];
-    if (overview.head) items.push({ label: "Новая ветка…", icon: "branch", run: () => setBranching({}) });
     items.push({ label: "Показать всё", icon: "wave", run: fit });
     if (Object.keys(layout.lanes).length) items.push({ label: "Упорядочить песни…", icon: "grip", run: arrange });
     return items;
@@ -993,8 +1050,8 @@ export function BlueprintTab({
   const draggedLane = drag?.kind === "node" ? basePlaced.find((p) => p.lane.path === drag.lane)?.lane : undefined;
   const draggedNode = drag?.kind === "node" ? draggedLane?.nodes.find((n) => nodeKey(n) === drag.key) : undefined;
   const dock =
-    draggedNode?.kind === "version" && draggedNode.owner && draggedNode.change !== "deleted" && !draggedNode.pruned
-      ? { node: draggedNode, branches: overview.branches.filter((b) => b.head && b.name !== draggedNode.owner) }
+    draggedLane && draggedNode?.kind === "version" && draggedNode.change !== "deleted"
+      ? { node: draggedNode, branches: draggedLane.branches.filter((b) => b.name !== draggedNode.branch) }
       : null;
 
   return (
@@ -1145,9 +1202,8 @@ export function BlueprintTab({
           {dock && (
             <div className="bp-dock">
               <span className="bp-dock-title">
-                Перенести «{splitPath(dock.node.path).name}» из ветки «{dock.node.owner}» в:
+                Версия {dock.node.number} «{splitPath(dock.node.path).name}» из ветки «{dock.node.branch}» — в ветку:
               </span>
-              {dock.branches.length === 0 && <span className="muted">других веток нет — создайте ветку</span>}
               {dock.branches.map((b) => (
                 <span
                   key={b.name}
@@ -1155,9 +1211,15 @@ export function BlueprintTab({
                   className={`bp-dock-branch ${drag?.kind === "node" && drag.branch === b.name ? "over" : ""}`}
                 >
                   <Icon name="branch" size={13} /> {b.name}
-                  {b.current && <span className="muted"> · текущая</span>}
+                  {b.active && <span className="muted"> · в папке</span>}
                 </span>
               ))}
+              <span
+                data-branch={NEW_BRANCH}
+                className={`bp-dock-branch new ${drag?.kind === "node" && drag.branch === NEW_BRANCH ? "over" : ""}`}
+              >
+                <Icon name="plus" size={13} /> новая ветка
+              </span>
             </div>
           )}
 
@@ -1235,12 +1297,28 @@ export function BlueprintTab({
         />
       )}
       {branching && (
-        <BranchDialog
-          overview={overview}
-          from={branching.from}
-          song={branching.song}
+        <SongBranchDialog
+          path={branching.lane.path}
+          taken={branching.lane.branches.map((b) => b.name)}
+          start={branching.start}
+          onCreate={(name, source, intoFolder) => createBranch(branching, name, source, intoFolder)}
           onClose={() => setBranching(null)}
-          onCreated={onChanged}
+        />
+      )}
+      {naming && (
+        <PromptDialog
+          title={`Новая ветка «${splitPath(naming.lane.path).name}»`}
+          label="Название ветки"
+          placeholder="Например: акустика, ремикс"
+          confirm="Перенести"
+          hint={`Версия ${naming.node.number} уйдёт из ветки «${naming.node.branch}» в новую. Файлы не меняются.`}
+          onSubmit={async (name) => {
+            if (naming.lane.branches.some((b) => b.name.toLowerCase() === name.toLowerCase())) {
+              throw new Error(`У трека уже есть ветка «${name}»`);
+            }
+            moveToBranch(naming.lane, naming.node, name);
+          }}
+          onClose={() => setNaming(null)}
         />
       )}
       {renaming && (
@@ -1283,7 +1361,7 @@ function ExecPin({ side, on }: { side: "in" | "out"; on: boolean }) {
   );
 }
 
-const parentsOf = (n: LaneNode) => (n.kind === "work" ? (n.parent ? [n.parent] : []) : n.parents);
+const parentsOf = (n: LaneNode) => (n.kind === "work" ? (n.parent ? [n.parent] : []) : n.links);
 
 /**
  * One song: a frame with its title, the song's own node, then its versions
@@ -1320,6 +1398,9 @@ const LaneView = memo(function LaneView({
   const fed = new Set(lane.nodes.flatMap(parentsOf));
   const starts = lane.nodes.filter((n) => !parentsOf(n).some((p) => keys.has(p)));
   const muted = lane.status === "removed" || lane.status === "elsewhere";
+  const activeBranch = lane.branches.find((b) => b.active)?.name;
+  /** The first version of its branch shows the branch's name. */
+  const firstOfRow = (n: SongVersion) => !n.links.some((k) => byKey.get(k)?.kind === "version" && (byKey.get(k) as SongVersion).branch === n.branch);
 
   const versionTrack = (n: SongVersion): Track => ({
     root,
@@ -1422,7 +1503,13 @@ const LaneView = memo(function LaneView({
             {lane.status !== "saved" && !muted && <KindBadge kind={lane.status as ChangeKind} />}
             <span className="bp-text">{laneText(lane)}</span>
           </div>
-          <div className="bp-row bp-meta">{dir && <span className="bp-text">{dir.slice(0, -1)}</span>}</div>
+          <div className="bp-row bp-meta">
+            <span className="bp-text">
+              {[dir.slice(0, -1), lane.branches.length > 1 && activeBranch ? `в папке ветка «${activeBranch}»` : ""]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          </div>
           <div className="bp-row">{file && <FileLabels labels={file.labels} />}</div>
         </div>
         <ExecPin side="out" on={starts.length > 0} />
@@ -1505,9 +1592,7 @@ const LaneView = memo(function LaneView({
             ].join(" ")}
             onClick={() => act.current.select(lane.path, n.key)}
             onContextMenu={(e) => act.current.versionMenu(e, lane, n)}
-            title={`${v.message || "без описания"}\n${formatDate(v.createdAt)} · ${v.author} · ${short(v.id)}${
-              n.owner ? `\nВетка «${n.owner}»: перетащите на другую ветку, чтобы перенести` : ""
-            }`}
+            title={`${v.message || "без описания"}\n${formatDate(v.createdAt)} · ${v.author} · ${short(v.id)}\nВетка «${n.branch}»: перетащите, чтобы перенести в другую ветку трека`}
           >
             <div className="bp-node-head">
               <Icon name={merge ? "merge" : n.change === "deleted" ? "trash" : icon} size={12} />
@@ -1536,12 +1621,12 @@ const LaneView = memo(function LaneView({
               </div>
               <div className="bp-row bp-foot">
                 <FileLabels labels={n.labels} />
-                {n.branches.map((b) => (
-                  <span key={b.name} className={`bp-branch ${b.current ? "current" : ""}`}>
+                {(firstOfRow(n) || n.inFolder) && lane.branches.length > 1 && (
+                  <span className={`bp-branch ${n.branch === activeBranch ? "current" : ""}`} title="Ветка трека">
                     <Icon name="branch" size={10} />
-                    {b.name}
+                    {n.branch}
                   </span>
-                ))}
+                )}
                 {tags.map((t) => (
                   <span key={t} className="bp-tag">
                     <Icon name="tag" size={10} />
