@@ -295,6 +295,8 @@ export function FileDetail({
   path,
   file,
   removed,
+  elsewhere,
+  rev,
   drafts,
   highlight,
   focusDraft,
@@ -308,11 +310,15 @@ export function FileDetail({
   file: ProjectFile | null;
   /** Set for a file deleted and saved as deleted. */
   removed?: RemovedFile | null;
+  /** Branches that have the file, for a file only on other branches. */
+  elsewhere?: string[];
+  /** Show the history leading to this version (default: the current branch). */
+  rev?: string | null;
   drafts: Drafts;
   /** A version to point out in the list. */
   highlight?: string | null;
-  /** Put the cursor into the description, e.g. after "Сохранить…" on the diagram. */
-  focusDraft?: boolean;
+  /** Changes to put the cursor into the description, e.g. after a click on "сейчас" on the diagram. */
+  focusDraft?: number;
   /** Changes when labels were edited: the versions are loaded again. */
   refreshKey: number;
   onChanged: () => void;
@@ -333,13 +339,13 @@ export function FileDetail({
   useEffect(() => {
     let alive = true;
     api
-      .fileHistory(root, path)
+      .fileHistory(root, path, rev ?? null)
       .then((v) => alive && (setVersions(v), setError(null)))
       .catch((e) => alive && setError(errorText(e)));
     return () => {
       alive = false;
     };
-  }, [root, path, head, refreshKey]);
+  }, [root, path, head, rev, refreshKey]);
 
   useEffect(() => {
     if (focusDraft) draftBox.current?.focus();
@@ -381,7 +387,11 @@ export function FileDetail({
         <h2>{name}</h2>
         <div className="detail-meta">
           {dir && <span>{dir.slice(0, -1)}</span>}
-          {removed ? (
+          {elsewhere ? (
+            <span className="status-pill removed">
+              только в {elsewhere.length > 1 ? "ветках" : "ветке"} {elsewhere.map((b) => `«${b}»`).join(", ")}
+            </span>
+          ) : removed ? (
             <span className="status-pill removed">удалён из проекта</span>
           ) : pending ? (
             <span className={`status-pill ${pending}`}>не сохранено</span>
@@ -396,7 +406,7 @@ export function FileDetail({
           {file && file.labels.length > 0 && <FileLabels labels={file.labels} />}
         </div>
         <div className="detail-actions">
-          {removed ? (
+          {elsewhere ? null : removed ? (
             <button className="btn btn-primary" onClick={() => actions.restore(path, removed.last)}>
               <Icon name="restore" /> Вернуть в проект
             </button>
@@ -409,7 +419,7 @@ export function FileDetail({
               <Icon name="download" /> Загрузить новую версию…
             </button>
           )}
-          {!removed && pending !== "deleted" && (
+          {!removed && !elsewhere && pending !== "deleted" && (
             <button
               className="btn"
               onClick={() => api.reveal(`${root}/${path}`).catch((e) => toast(errorText(e), "error"))}
@@ -475,7 +485,10 @@ export function FileDetail({
         </div>
       )}
 
-      <div className="section-title">Версии файла{versions ? ` · ${versions.length}` : ""}</div>
+      <div className="section-title">
+        Версии файла{versions ? ` · ${versions.length}` : ""}
+        {rev && <span className="muted"> · по истории выбранной версии (другая ветка)</span>}
+      </div>
       {error && <div className="error-text">{error}</div>}
       {versions?.length === 0 && (
         <div className="muted">Сохранённых версий ещё нет — сохраните файл, и здесь начнётся его история.</div>
@@ -492,7 +505,7 @@ export function FileDetail({
                 <div className="version-title">
                   <KindBadge kind={v.kind} />
                   <span className="version-message">{v.snapshot.message || "Без описания"}</span>
-                  {i === 0 && exists && !removed && <span className="label label-current">последняя</span>}
+                  {i === 0 && exists && !removed && !rev && <span className="label label-current">последняя</span>}
                   {v.pruned && (
                     <span className="muted" title="Содержимое удалено при очистке места">
                       удалён при очистке

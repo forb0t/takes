@@ -468,6 +468,48 @@ fn labels_travel_and_the_latest_change_wins() {
 }
 
 #[test]
+fn shared_settings_travel_and_the_latest_change_wins() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "a.wav", "a");
+    laptop.commit("a", &[]).unwrap();
+    laptop
+        .set_shared_setting("songs.order", r#"["b.wav","a.wav"]"#)
+        .unwrap();
+    world.sync(&mut laptop);
+
+    let mut studio = world.clone("studio");
+    assert_eq!(
+        studio.shared_setting("songs.order").unwrap().as_deref(),
+        Some(r#"["b.wav","a.wav"]"#)
+    );
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    studio
+        .set_shared_setting("songs.order", r#"["a.wav","b.wav"]"#)
+        .unwrap();
+    world.sync(&mut studio);
+    world.sync(&mut laptop);
+    assert_eq!(
+        laptop.shared_setting("songs.order").unwrap().as_deref(),
+        Some(r#"["a.wav","b.wav"]"#)
+    );
+    // Nothing new is written when nothing changed.
+    world.remote.take_writes();
+    laptop
+        .set_shared_setting("songs.order", r#"["a.wav","b.wav"]"#)
+        .unwrap();
+    world.sync(&mut laptop);
+    assert!(
+        !world
+            .remote
+            .take_writes()
+            .iter()
+            .any(|w| w.starts_with("settings/"))
+    );
+    assert!(laptop.set_shared_setting("bad key!", "x").is_err());
+}
+
+#[test]
 fn a_deleted_branch_goes_away_on_other_devices() {
     let world = World::new();
     let mut laptop = world.device("laptop");

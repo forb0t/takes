@@ -44,7 +44,7 @@ interface PlayerApi {
 
 const PlayerContext = createContext<PlayerApi | null>(null);
 
-function usePlayer(): PlayerApi {
+export function usePlayer(): PlayerApi {
   const ctx = useContext(PlayerContext);
   if (!ctx) throw new Error("PlayerProvider is missing");
   return ctx;

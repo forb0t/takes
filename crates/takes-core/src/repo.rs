@@ -21,6 +21,7 @@ mod archive;
 mod cleanup;
 mod import;
 mod meta;
+mod settings;
 mod sync;
 pub use cleanup::Cleanup;
 pub use import::Imported;

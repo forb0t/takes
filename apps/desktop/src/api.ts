@@ -251,8 +251,14 @@ export const api = {
   log: (root: string, rev: string | null) => invoke<Snapshot[]>("log", { root, rev }),
   snapshotChanges: (root: string, id: string) => invoke<Change[]>("snapshot_changes", { root, id }),
   files: (root: string, rev: string) => invoke<FileInfo[]>("files", { root, rev }),
-  fileHistory: (root: string, path: string) => invoke<FileVersion[]>("file_history", { root, path }),
+  /** Versions of a file along `rev` (default: the current branch), newest first. */
+  fileHistory: (root: string, path: string, rev: string | null = null) =>
+    invoke<FileVersion[]>("file_history", { root, path, rev }),
   removedFiles: (root: string) => invoke<RemovedFile[]>("removed_files", { root }),
+  /** A setting every device of the project shares, e.g. "songs.order". */
+  sharedSetting: (root: string, key: string) => invoke<string | null>("shared_setting", { root, key }),
+  setSharedSetting: (root: string, key: string, value: string) =>
+    invoke<void>("set_shared_setting", { root, key, value }),
   stats: (root: string) => invoke<Stats>("stats", { root }),
   cleanup: (root: string, olderThanDays: number | null, dryRun: boolean) =>
     invoke<Cleanup>("cleanup", { root, olderThanDays, dryRun }),

@@ -25,8 +25,12 @@ const graph: GraphVersion[] = (
     [5, [14], "Ночь: новый текст второго куплета", "nikita", 3600 * 3, [["02 Ночь/lyrics.txt", "modified"]]],
     [4, [3], "Акустическая версия «Ночи»: гитара + вокал", "masha", 3600 * 26, [["02 Ночь/demo.wav", "modified"]]],
     [14, [3], "Ночь: перезаписал вокал", "nikita", 3600 * 30, [["02 Ночь/demo.wav", "modified"]]],
-    [3, [13], "Intro: переписал синты, убрал лишний пад", "nikita", 86400 * 3, [["01 Intro.wav", "modified"]]],
-    [13, [2], "Проект «Рассвета»", "nikita", 86400 * 5, [["03 Рассвет/Рассвет.als", "added"]]],
+    [3, [21], "Intro: переписал синты, убрал лишний пад", "nikita", 86400 * 3, [["01 Intro.wav", "modified"]]],
+    [21, [20], "Текст акустической версии", "masha", 86400 * 4, [["02 Ночь/lyrics (acoustic).txt", "added"]]],
+    [20, [19], "Старый баунс «Рассвета»", "nikita", 86400 * 4.2, [["03 Рассвет/old_bounce.mp3", "added"]]],
+    [19, [18], "Трек-лист", "masha", 86400 * 4.5, [["tracklist.md", "added"]]],
+    [18, [13], "Аккорды «Ночи»", "masha", 86400 * 4.8, [["02 Ночь/chords.pdf", "added"]]],
+    [13, [2], "Проект «Рассвета»", "nikita", 86400 * 5, [["03 Рассвет/Рассвет Project/Рассвет.als", "added"]]],
     [2, [12], "Черновик обложки", "masha", 86400 * 9, [["cover.png", "added"]]],
     [12, [11], "Текст «Ночи»", "nikita", 86400 * 20, [["02 Ночь/lyrics.txt", "added"]]],
     [11, [1], "Демо «Ночи»", "nikita", 86400 * 25, [["02 Ночь/demo.wav", "added"]]],
@@ -263,6 +267,10 @@ mockIPC(
         return params.has("empty") ? [] : graph;
       case "commit":
         return (a.paths as string[]).length > 0 ? [id(30)] : status.map((_, i) => id(30 + i));
+      case "shared_setting":
+        return null;
+      case "set_shared_setting":
+        return null;
       case "removed_files":
         return [
           { path: "03 Рассвет/old_take.wav", last: id(3) },

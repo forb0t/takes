@@ -39,6 +39,11 @@ const paths = {
   label: "M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9zM8 8h.01",
   archive: "M3 5h18v4H3zM5 9v10h14V9M10 13h4",
   broom: "M14 4l-4 8M6 13h8l2 7H4zM8 16v4M12 16v4",
+  grip: "M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+  minus: "M5 12h14",
+  up: "M12 19V5M6 11l6-6 6 6",
+  down: "M12 5v14M6 13l6 6 6-6",
 } as const;
 
 export type IconName = keyof typeof paths;

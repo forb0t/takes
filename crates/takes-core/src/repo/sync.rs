@@ -11,6 +11,7 @@
 //! comments/<uid>.json          one comment
 //! resolved/<uid>               marks that comment resolved
 //! meta/<uid>.json              one change to a file's labels, tempo or key
+//! settings/<uid>.json          one change to a shared setting (song order)
 //! tags/<hex name>              a tag (first writer wins)
 //! refs/<device>/b-<hex name>   branch heads of one device, written only by it
 //! refs/<device>/d-<hex name>   branches that device deleted, at which version
@@ -189,6 +190,15 @@ struct CommentFile {
     text: String,
     author: String,
     created_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SettingFile {
+    uid: String,
+    key: String,
+    value: String,
+    at: i64,
+    author: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -832,7 +842,8 @@ impl Repo {
         tx.commit()?;
 
         self.fetch_comments(storage, report)?;
-        self.fetch_meta(storage, report)
+        self.fetch_meta(storage, report)?;
+        self.fetch_settings(storage)
     }
 
     /// Downloads the versions leading to `starts` that we lack. Each version
@@ -1149,6 +1160,51 @@ impl Repo {
         Ok(())
     }
 
+    fn fetch_settings(&mut self, storage: &dyn Storage) -> Result<()> {
+        let seen: HashSet<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path FROM remote_seen WHERE path LIKE 'settings/%'")?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let unseen: Vec<String> = storage
+            .list("settings")?
+            .into_iter()
+            .map(|file| format!("settings/{file}"))
+            .filter(|path| path.ends_with(".json") && !seen.contains(path))
+            .collect();
+        let conn = &self.conn;
+        parallel(
+            unseen,
+            |path| {
+                let data = storage.read(&path)?;
+                Ok((path, data))
+            },
+            |(path, data)| {
+                let event = data
+                    .as_deref()
+                    .and_then(|d| serde_json::from_slice::<SettingFile>(d).ok())
+                    .map(|f| super::settings::SettingEvent {
+                        uid: f.uid,
+                        key: f.key,
+                        value: f.value,
+                        at: f.at,
+                        author: f.author,
+                    });
+                if let Some(event) = event {
+                    self.import_setting(&event)?;
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
+                    [path],
+                )?;
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
     // ---- integrate ------------------------------------------------------------
 
     /// Moves local branches forward to newer versions from other devices,
@@ -1378,6 +1434,7 @@ impl Repo {
 
         self.push_comments(storage, report)?;
         self.push_meta(storage, report)?;
+        self.push_settings(storage)?;
         self.push_refs(storage)
     }
 
@@ -1405,6 +1462,34 @@ impl Repo {
                     [path],
                 )?;
                 report.notes_sent += 1;
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
+    fn push_settings(&mut self, storage: &dyn Storage) -> Result<()> {
+        let conn = &self.conn;
+        parallel(
+            self.unpushed_settings()?,
+            |event| {
+                let path = format!("settings/{}.json", event.uid);
+                let file = SettingFile {
+                    uid: event.uid,
+                    key: event.key,
+                    value: event.value,
+                    at: event.at,
+                    author: event.author,
+                };
+                storage.write(&path, &json(&file)?)?;
+                Ok((file.uid, path))
+            },
+            |(uid, path)| {
+                conn.execute("UPDATE setting_events SET pushed = 1 WHERE uid = ?1", [uid])?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
+                    [path],
+                )?;
                 Ok(())
             },
         )?;

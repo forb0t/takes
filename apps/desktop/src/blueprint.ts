@@ -1,75 +1,79 @@
 /**
- * Layout of the project diagram: versions as nodes on branch lanes (older
- * to the left), songs as nodes on the far left, and wires: version order
- * (white), each song's own history (in its colour) and branch heads.
+ * The project diagram: one lane per song (file) with its versions from left
+ * to right and, at the end, the file as it is on disk when it is not saved.
+ * A song's versions on other branches fork into rows below and merges join
+ * them back, so each lane is that song's own history.
  */
-import type { Branch, Change, GraphVersion } from "./api";
+import type { Branch, ChangeKind, GraphVersion } from "./api";
+import type { FileStatus, ProjectFile } from "./components/FilesTab";
+import { naturalCompare } from "./util";
 
-export const NODE_W = 236;
-export const NODE_H = 98;
-export const SONG_W = 210;
-export const SONG_H = 56;
-export const BRANCH_W = 190;
-export const BRANCH_H = 56;
-const COL = NODE_W + 64;
-const LANE = NODE_H + 130;
-const SONG_X = -SONG_W - 140;
-const SONG_GAP = 18;
+/** Geometry, in CSS pixels at 100%. */
+export const HEAD_W = 280;
+export const NODE_W = 208;
+export const NODE_H = 80;
+export const COL_W = 244;
+export const ROW_H = 100;
+export const LANE_PAD = 14;
+export const BODY_PAD = 24;
 
-/** Where pins sit on a node, from its top-left corner. */
-export const PIN_EXEC_Y = 15;
-export const PIN_SONG_Y = 62;
-
-export type NodeKey = string;
-
-export interface VersionNode {
+/** A version in which the song changed. */
+export interface SongVersion {
   kind: "version";
-  key: NodeKey;
-  x: number;
-  y: number;
-  version: GraphVersion;
-  /** The file this version is about; null for merges of many files. */
-  song: string | null;
-  change: Change | null;
-}
-
-export interface SongNode {
-  kind: "song";
-  key: NodeKey;
-  x: number;
-  y: number;
-  path: string;
-  versions: number;
-}
-
-export interface BranchNode {
-  kind: "branch";
-  key: NodeKey;
-  x: number;
-  y: number;
-  branch: Branch;
-}
-
-export type DiagramNode = VersionNode | SongNode | BranchNode;
-
-export interface Wire {
   key: string;
-  from: NodeKey;
-  to: NodeKey;
-  /** exec: version order; merge: a second parent; song: a song's history; branch: a head. */
-  kind: "exec" | "merge" | "song" | "branch";
-  /** The song a song wire belongs to. */
-  song?: string;
+  path: string;
+  version: GraphVersion;
+  change: ChangeKind;
+  /** Content removed by cleanup: cannot be played or restored. */
+  pruned: boolean;
+  labels: string[];
+  /** Earlier versions of this song it continues; two when branches joined. */
+  parents: string[];
+  /** v1, v2… in the order the song's versions were saved; null for a deletion. */
+  number: number | null;
+  /** Branches whose latest version of the song this is, shown when branches differ. */
+  branches: Branch[];
+  /** In the history of the current branch. */
+  onCurrent: boolean;
+  /** The content the project folder has now. */
+  inFolder: boolean;
+  col: number;
+  row: number;
 }
 
-export interface Diagram {
-  nodes: Map<NodeKey, DiagramNode>;
-  wires: Wire[];
+/** The file on disk when it differs from the saved version. */
+export interface WorkNode {
+  kind: "work";
+  key: string;
+  path: string;
+  status: ChangeKind;
+  /** The saved version it differs from. */
+  parent: string | null;
+  col: number;
+  row: number;
 }
 
-export const versionKey = (id: string) => `v:${id}`;
-export const songKey = (path: string) => `s:${path}`;
-export const branchKey = (name: string) => `b:${name}`;
+export type LaneNode = SongVersion | WorkNode;
+
+/** "removed": deleted and saved as deleted; "elsewhere": only on other branches. */
+export type LaneStatus = FileStatus | "removed" | "elsewhere";
+
+export interface Lane {
+  path: string;
+  status: LaneStatus;
+  nodes: LaneNode[];
+  rows: number;
+  cols: number;
+  /** Saved versions, deletions not counted. */
+  versions: number;
+  /** Branches that have the song, for a song only on other branches. */
+  branchNames: string[];
+}
+
+export const laneHeight = (lane: Lane) => LANE_PAD * 2 + lane.rows * ROW_H - (ROW_H - NODE_H);
+export const nodeX = (col: number) => BODY_PAD + col * COL_W;
+export const nodeY = (row: number) => LANE_PAD + row * ROW_H;
+export const bodyWidth = (cols: number) => BODY_PAD * 2 + Math.max(cols, 1) * COL_W;
 
 /** A stable colour per song. */
 export function songHue(path: string): number {
@@ -81,165 +85,214 @@ export function songHue(path: string): number {
   return Math.abs(h) % 360;
 }
 
-/**
- * Places every node. `versions` come newest first (children before parents);
- * `branches` with the current one marked.
- */
-export function layout(versions: GraphVersion[], branches: Branch[]): Diagram {
-  const byId = new Map(versions.map((v) => [v.id, v]));
-  const oldestFirst = [...versions].reverse();
-  const nodes = new Map<NodeKey, DiagramNode>();
-  const wires: Wire[] = [];
+const keyOf = (id: string, path: string) => `${id}:${path}`;
 
-  // Column: one step right of the latest parent, so parallel work on
-  // different branches shares columns.
-  const column = new Map<string, number>();
-  for (const v of oldestFirst) {
-    const parents = v.parents.filter((p) => column.has(p));
-    column.set(v.id, parents.length ? 1 + Math.max(...parents.map((p) => column.get(p)!)) : 0);
+/**
+ * Builds every lane. `versions` come newest first (children before
+ * parents), `order` is the song order people chose (others follow by name).
+ */
+export function buildLanes(
+  versions: GraphVersion[],
+  branches: Branch[],
+  files: ProjectFile[],
+  removed: Set<string>,
+  order: string[],
+): Lane[] {
+  const nodes = new Map<string, SongVersion>();
+  /** Per version: for each song, the latest versions of it in that version's history. */
+  const latest = new Map<string, Map<string, string[]>>();
+
+  // Is `a` an earlier version of the same song than `b`?
+  const isBefore = (a: string, b: string) => {
+    const stack = [b];
+    const seen = new Set<string>();
+    while (stack.length) {
+      const k = stack.pop()!;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      for (const p of nodes.get(k)?.parents ?? []) {
+        if (p === a) return true;
+        stack.push(p);
+      }
+    }
+    return false;
+  };
+  const newest = (keys: string[]) => {
+    const unique = [...new Set(keys)];
+    return unique.filter((k) => !unique.some((o) => o !== k && isBefore(k, o)));
+  };
+
+  for (const v of [...versions].reverse()) {
+    const from = v.parents.map((p) => latest.get(p)).filter((m): m is Map<string, string[]> => !!m);
+    const inherited = new Map(from[0] ?? []);
+    for (const other of from.slice(1)) {
+      for (const [path, keys] of other) {
+        const mine = inherited.get(path);
+        inherited.set(path, mine && mine !== keys ? newest([...mine, ...keys]) : keys);
+      }
+    }
+    for (const c of v.changes) {
+      const key = keyOf(v.id, c.path);
+      nodes.set(key, {
+        kind: "version",
+        key,
+        path: c.path,
+        version: v,
+        change: c.kind,
+        pruned: c.pruned,
+        labels: c.labels,
+        parents: inherited.get(c.path) ?? [],
+        number: null,
+        branches: [],
+        onCurrent: false,
+        inFolder: false,
+        col: 0,
+        row: 0,
+      });
+      inherited.set(c.path, [key]);
+    }
+    latest.set(v.id, inherited);
   }
 
-  // Lane: the current branch first, then main, then the most recent ones;
-  // each takes the versions along its first parents that no lane has yet.
-  const order = [...branches]
-    .filter((b) => b.head && byId.has(b.head))
+  const current = branches.find((b) => b.current);
+  const atHead = (current?.head && latest.get(current.head)) || new Map<string, string[]>();
+  const stack = [...atHead.values()].flat();
+  while (stack.length) {
+    const node = nodes.get(stack.pop()!);
+    if (!node || node.onCurrent) continue;
+    node.onCurrent = true;
+    stack.push(...node.parents);
+  }
+
+  // The current branch claims the first row of every lane, then main, then
+  // the most recent branches.
+  const branchOrder = branches
+    .filter((b) => b.head && latest.has(b.head))
     .sort((a, b) => {
       const rank = (x: Branch) => (x.current ? 0 : x.name === "main" ? 1 : 2);
-      return rank(a) - rank(b) || byId.get(b.head!)!.createdAt - byId.get(a.head!)!.createdAt;
+      const time = (x: Branch) => versions.find((v) => v.id === x.head)?.createdAt ?? 0;
+      return rank(a) - rank(b) || time(b) - time(a);
     });
-  const lane = new Map<string, number>();
-  let lanes = 0;
-  const claim = (head: string) => {
-    let id: string | undefined = head;
-    let took = false;
-    while (id && byId.has(id) && !lane.has(id)) {
-      lane.set(id, lanes);
-      took = true;
-      id = byId.get(id)!.parents[0];
-    }
-    if (took) lanes++;
-  };
-  order.forEach((b) => claim(b.head!));
-  versions.forEach((v) => claim(v.id)); // versions only tags or old merges lead to
 
-  for (const v of versions) {
-    const single = v.changes.length === 1 && v.parents.length < 2 ? v.changes[0] : null;
-    nodes.set(versionKey(v.id), {
-      kind: "version",
-      key: versionKey(v.id),
-      x: column.get(v.id)! * COL,
-      y: lane.get(v.id)! * LANE,
-      version: v,
-      song: single?.path ?? null,
-      change: single,
-    });
-    v.parents.forEach((p, i) => {
-      if (byId.has(p)) {
-        wires.push({ key: `p:${p}>${v.id}`, from: versionKey(p), to: versionKey(v.id), kind: i ? "merge" : "exec" });
+  const byPath = new Map<string, SongVersion[]>();
+  for (const node of nodes.values()) {
+    const list = byPath.get(node.path);
+    if (list) list.push(node);
+    else byPath.set(node.path, [node]);
+  }
+  const fileByPath = new Map(files.map((f) => [f.path, f]));
+  const paths = new Set([...byPath.keys(), ...fileByPath.keys()]);
+
+  const lanes: Lane[] = [];
+  for (const path of paths) {
+    const list = byPath.get(path) ?? []; // oldest first: parents before children
+    const file = fileByPath.get(path);
+
+    let n = 0;
+    for (const node of list) {
+      if (node.change !== "deleted") node.number = ++n;
+      node.col = node.parents.length ? 1 + Math.max(...node.parents.map((p) => nodes.get(p)?.col ?? 0)) : 0;
+    }
+
+    const rowOf = new Map<string, number>();
+    let rows = 0;
+    const claim = (start: string) => {
+      let key: string | undefined = start;
+      let took = false;
+      while (key && nodes.has(key) && !rowOf.has(key)) {
+        rowOf.set(key, rows);
+        took = true;
+        key = nodes.get(key)!.parents[0];
       }
-    });
-  }
+      if (took) rows++;
+    };
+    const tips = new Map<string, Branch[]>();
+    for (const b of branchOrder) {
+      for (const key of latest.get(b.head!)?.get(path) ?? []) {
+        claim(key);
+        tips.set(key, [...(tips.get(key) ?? []), b]);
+      }
+    }
+    for (const node of [...list].reverse()) claim(node.key); // only tags or old merges lead here
+    for (const node of list) node.row = rowOf.get(node.key) ?? 0;
 
-  // Each song's history: from the version that last touched it before
-  // (along first parents) to the next; the first one hangs off the song.
-  const touched = new Map<string, Map<string, string>>(); // version → song → last version touching it
-  const songs = new Map<string, { first: number; count: number }>();
-  for (const v of oldestFirst) {
-    const inherited = touched.get(v.parents[0]) ?? new Map<string, string>();
-    const own = new Map(inherited);
-    const node = nodes.get(versionKey(v.id)) as VersionNode;
-    if (node.song) {
-      const song = node.song;
-      const before = inherited.get(song);
-      wires.push({
-        key: `s:${song}>${v.id}`,
-        from: before ? versionKey(before) : songKey(song),
-        to: versionKey(v.id),
-        kind: "song",
-        song,
-      });
-      own.set(song, v.id);
+    // Branch names only where branches disagree about the song.
+    if (tips.size > 1) {
+      for (const [key, owners] of tips) nodes.get(key)!.branches = owners;
     }
-    // A merge has no song pins: the thread goes on from before it.
-    for (const c of v.changes) {
-      const seen = songs.get(c.path);
-      if (seen) seen.count++;
-      else songs.set(c.path, { first: songs.size, count: 1 });
+
+    const tip = atHead.get(path) ?? [];
+    for (const key of tip) {
+      const node = nodes.get(key)!;
+      node.inFolder = file?.status === "saved" && node.change !== "deleted";
     }
-    touched.set(v.id, own);
-  }
-  [...songs.entries()]
-    .sort((a, b) => a[1].first - b[1].first)
-    .forEach(([path, s], i) => {
-      nodes.set(songKey(path), {
-        kind: "song",
-        key: songKey(path),
-        x: SONG_X,
-        y: i * (SONG_H + SONG_GAP),
+
+    const laneNodes: LaneNode[] = [...list];
+    if (file && file.status !== "saved") {
+      const parent = tip.find((k) => nodes.get(k)?.change !== "deleted") ?? tip[0] ?? null;
+      const from = parent ? nodes.get(parent)! : null;
+      laneNodes.push({
+        kind: "work",
+        key: `w:${path}`,
         path,
-        versions: s.count,
+        status: file.status,
+        parent,
+        col: from ? from.col + 1 : 0,
+        // A file new here but known on another branch gets a row of its own.
+        row: from ? from.row : list.length ? rows++ : 0,
       });
+    }
+
+    lanes.push({
+      path,
+      status: file ? file.status : removed.has(path) ? "removed" : "elsewhere",
+      nodes: laneNodes,
+      rows: Math.max(rows, 1),
+      cols: Math.max(0, ...laneNodes.map((x) => x.col + 1)),
+      versions: n,
+      branchNames: file
+        ? []
+        : branchOrder
+            .filter((b) => {
+              const keys = latest.get(b.head!)?.get(path) ?? [];
+              return keys.some((k) => nodes.get(k)?.change !== "deleted");
+            })
+            .map((b) => b.name),
     });
-
-  // Branch nodes below and right of their head; several on one head stack.
-  const perHead = new Map<string, number>();
-  for (const b of order) {
-    const head = nodes.get(versionKey(b.head!))!;
-    const k = perHead.get(b.head!) ?? 0;
-    perHead.set(b.head!, k + 1);
-    nodes.set(branchKey(b.name), {
-      kind: "branch",
-      key: branchKey(b.name),
-      x: head.x + NODE_W + 36 + k * (BRANCH_W + 16),
-      y: head.y + NODE_H + 22,
-      branch: b,
-    });
-    wires.push({ key: `b:${b.name}`, from: head.key, to: branchKey(b.name), kind: "branch" });
   }
-  return { nodes, wires };
+
+  const rank = new Map(order.map((p, i) => [p, i]));
+  const group = laneGroup;
+  return lanes.sort((a, b) => {
+    const ra = rank.get(a.path);
+    const rb = rank.get(b.path);
+    return (
+      group(a) - group(b) ||
+      (ra !== undefined && rb !== undefined ? ra - rb : ra !== undefined ? -1 : rb !== undefined ? 1 : 0) ||
+      naturalCompare(a.path, b.path)
+    );
+  });
 }
 
-export function nodeSize(node: DiagramNode): { w: number; h: number } {
-  if (node.kind === "version") return { w: NODE_W, h: NODE_H };
-  if (node.kind === "song") return { w: SONG_W, h: SONG_H };
-  return { w: BRANCH_W, h: BRANCH_H };
-}
+/** Songs of the folder first, then songs only on other branches, then removed ones. */
+export const laneGroup = (l: Lane) => (l.status === "removed" ? 2 : l.status === "elsewhere" ? 1 : 0);
 
-/** Pin positions: where a wire of `kind` leaves `from` and enters `to`. */
-export function wireEnds(
-  wire: Wire,
-  from: DiagramNode,
-  to: DiagramNode,
-): { x1: number; y1: number; x2: number; y2: number } {
-  const out = wire.kind === "song" && from.kind === "version" ? PIN_SONG_Y : from.kind === "song" ? SONG_H / 2 : PIN_EXEC_Y;
-  const into = wire.kind === "song" ? PIN_SONG_Y : to.kind === "branch" ? BRANCH_H / 2 : PIN_EXEC_Y;
-  return {
-    x1: from.x + nodeSize(from).w,
-    y1: from.y + out,
-    x2: to.x,
-    y2: to.y + into,
-  };
-}
-
-/**
- * A blueprint-style curve: out to the right, into the left. A wire that
- * skips over nodes on its own lane dips below them, so it never looks like
- * it plugs into the nodes it passes; `lift` keeps parallel ones apart.
- */
-export function wirePath(
-  { x1, y1, x2, y2 }: { x1: number; y1: number; x2: number; y2: number },
-  lift = 0,
-): string {
-  if (Math.abs(y2 - y1) < NODE_H && x2 - x1 > COL * 1.2) {
-    const below = Math.max(y1, y2) + (NODE_H - PIN_SONG_Y) + 26 + lift;
-    const r = 46;
-    return [
-      `M ${x1} ${y1}`,
-      `C ${x1 + r} ${y1}, ${x1 + r} ${below}, ${x1 + 2 * r} ${below}`,
-      `L ${x2 - 2 * r} ${below}`,
-      `C ${x2 - r} ${below}, ${x2 - r} ${y2}, ${x2} ${y2}`,
-    ].join(" ");
+/** The earlier saved version of the song a node continues, for comparing. */
+export function previousVersion(lane: Lane, node: LaneNode): SongVersion | null {
+  const parents = node.kind === "work" ? (node.parent ? [node.parent] : []) : node.parents;
+  for (const key of parents) {
+    const found = lane.nodes.find((n): n is SongVersion => n.kind === "version" && n.key === key);
+    if (found && found.change !== "deleted") return found;
   }
-  const pull = Math.max(40, Math.min(220, Math.abs(x2 - x1) * 0.5 + Math.abs(y2 - y1) * 0.15));
+  return null;
+}
+
+/** A curve from the right side of one node to the left side of another. */
+export function wire(from: { col: number; row: number }, to: { col: number; row: number }): string {
+  const x1 = nodeX(from.col) + NODE_W;
+  const y1 = nodeY(from.row) + NODE_H / 2;
+  const x2 = nodeX(to.col);
+  const y2 = nodeY(to.row) + NODE_H / 2;
+  const pull = Math.max(18, (x2 - x1) / 2);
   return `M ${x1} ${y1} C ${x1 + pull} ${y1}, ${x2 - pull} ${y2}, ${x2} ${y2}`;
 }

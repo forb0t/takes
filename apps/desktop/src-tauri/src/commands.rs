@@ -236,17 +236,40 @@ pub async fn import_files(
     .await
 }
 
-/// Every version of every branch with what it changed, for the diagram.
+/// Every version of every branch with what it changed (sizes, labels,
+/// whether cleanup removed the data), for the diagram.
 #[tauri::command]
 pub async fn history_graph(root: String) -> CmdResult<Vec<GraphVersionDto>> {
     blocking(move || {
         let repo = open(&root)?;
+        let pruned = repo.pruned()?;
+        let meta = repo.all_file_meta()?;
         repo.all_versions()?
             .iter()
             .map(|s| {
+                let changes = repo.changes_in(s.id)?;
+                let tree = if changes
+                    .iter()
+                    .any(|c| c.kind != takes_core::ChangeKind::Deleted)
+                {
+                    repo.tree(s.id)?
+                } else {
+                    Default::default()
+                };
                 Ok(GraphVersionDto {
                     snapshot: s.into(),
-                    changes: repo.changes_in(s.id)?.iter().map(Into::into).collect(),
+                    changes: changes
+                        .iter()
+                        .map(|c| {
+                            let entry = tree.get(&c.path);
+                            ChangeDto {
+                                size: entry.map(|e| e.size),
+                                pruned: entry.is_some_and(|e| pruned.contains(&e.blob)),
+                                labels: labels(&meta, entry.map(|e| e.blob)),
+                                ..c.into()
+                            }
+                        })
+                        .collect(),
                 })
             })
             .collect()
@@ -310,6 +333,17 @@ pub async fn files(root: String, rev: String) -> CmdResult<Vec<FileDto>> {
     .await
 }
 
+/// A setting every device of the project shares (e.g. "songs.order").
+#[tauri::command]
+pub async fn shared_setting(root: String, key: String) -> CmdResult<Option<String>> {
+    blocking(move || Ok(open(&root)?.shared_setting(&key)?)).await
+}
+
+#[tauri::command]
+pub async fn set_shared_setting(root: String, key: String, value: String) -> CmdResult<()> {
+    blocking(move || Ok(open(&root)?.set_shared_setting(&key, &value)?)).await
+}
+
 /// Files the current branch had in earlier versions and no longer has.
 #[tauri::command]
 pub async fn removed_files(root: String) -> CmdResult<Vec<RemovedFileDto>> {
@@ -326,14 +360,19 @@ pub async fn removed_files(root: String) -> CmdResult<Vec<RemovedFileDto>> {
     .await
 }
 
+/// Versions of a file along `rev` (default: the current branch), newest first.
 #[tauri::command]
-pub async fn file_history(root: String, path: String) -> CmdResult<Vec<FileVersionDto>> {
+pub async fn file_history(
+    root: String,
+    path: String,
+    rev: Option<String>,
+) -> CmdResult<Vec<FileVersionDto>> {
     blocking(move || {
         let repo = open(&root)?;
         let pruned = repo.pruned()?;
         let meta = repo.all_file_meta()?;
         Ok(repo
-            .file_history(&path, None)?
+            .file_history(&path, rev.as_deref())?
             .iter()
             .map(|v| FileVersionDto::new(v, &pruned, &meta))
             .collect())

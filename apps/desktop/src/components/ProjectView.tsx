@@ -345,7 +345,12 @@ export function ProjectView({ root }: { root: string }) {
         {tab === "blueprint" && (
           <BlueprintTab
             overview={overview}
+            files={files}
+            removed={removed}
+            drafts={drafts}
+            refreshKey={labelsVersion}
             onChanged={refreshAll}
+            onLabelsChanged={labelsChanged}
             onAddFiles={pickToAdd}
             onOpenFile={openFile}
             onUploadVersion={uploadVersion}

@@ -27,6 +27,8 @@ fn main() {
             commands::snapshot_changes,
             commands::files,
             commands::removed_files,
+            commands::shared_setting,
+            commands::set_shared_setting,
             commands::file_history,
             commands::stats,
             commands::cleanup,

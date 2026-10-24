@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{Error, Result};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE config (
@@ -149,6 +149,21 @@ CREATE TABLE meta_events (
 CREATE INDEX meta_events_blob ON meta_events (blob, field);
 ";
 
+/// Version 5: settings shared by every device (e.g. the order of songs).
+const MIGRATION_5: &str = "
+-- Like meta_events: every change is kept and synced, the latest per key wins.
+CREATE TABLE setting_events (
+    uid    TEXT PRIMARY KEY,
+    key    TEXT NOT NULL,
+    value  TEXT NOT NULL,
+    -- unix milliseconds
+    at     INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    pushed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX setting_events_key ON setting_events (key, at);
+";
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -175,6 +190,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 4 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_4} COMMIT;"))?;
+    }
+    if version < 5 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_5} COMMIT;"))?;
     }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
