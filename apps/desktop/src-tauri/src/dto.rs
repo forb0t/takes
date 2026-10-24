@@ -117,6 +117,14 @@ pub struct FileDto {
     pub labels: Vec<String>,
 }
 
+/// A file deleted and saved as deleted, with the version to bring it back from.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedFileDto {
+    pub path: String,
+    pub last: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileVersionDto {

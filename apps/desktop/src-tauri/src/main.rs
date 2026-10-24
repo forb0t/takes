@@ -26,6 +26,7 @@ fn main() {
             commands::log,
             commands::snapshot_changes,
             commands::files,
+            commands::removed_files,
             commands::file_history,
             commands::stats,
             commands::cleanup,

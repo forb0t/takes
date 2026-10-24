@@ -1,24 +1,43 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorText, type Change, type DivergedBranch, type Overview, type Stats, type SyncState } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  api,
+  errorText,
+  type Change,
+  type DivergedBranch,
+  type FileInfo,
+  type Overview,
+  type RemovedFile,
+  type Stats,
+  type SyncState,
+} from "../api";
 import { Icon, PromptDialog, useToast } from "../ui";
 import { formatSize, prettyPath } from "../util";
 import { BlueprintTab } from "./BlueprintTab";
 import { BranchMenu } from "./BranchMenu";
-import { ChangesTab } from "./ChangesTab";
 import { CleanupDialog } from "./CleanupDialog";
-import { FilesTab } from "./FilesTab";
+import { FilesTab, projectFiles, type Drafts } from "./FilesTab";
 import { HistoryTab } from "./HistoryTab";
 import { ImportDialog } from "./ImportDialog";
 import { MergeDialog } from "./MergeDialog";
 import { SyncControl } from "./SyncControl";
 
-type Tab = "changes" | "blueprint" | "history" | "files";
+type Tab = "files" | "blueprint" | "history";
 
 /** Files to bring into the project; `asPath` makes one the new version of that file. */
 type Importing = { sources: string[]; asPath?: string };
+
+const draftsKey = (root: string) => `takes.drafts:${root}`;
+
+function loadDrafts(root: string): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(draftsKey(root)) ?? "{}");
+  } catch {
+    return {};
+  }
+}
 
 export function ProjectView({ root }: { root: string }) {
   const toast = useToast();
@@ -27,7 +46,7 @@ export function ProjectView({ root }: { root: string }) {
   const [changes, setChanges] = useState<Change[] | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("changes");
+  const [tab, setTab] = useState<Tab>("files");
   const [editAuthor, setEditAuthor] = useState(false);
   const [syncState, setSyncState] = useState<SyncState | null>(null);
   const [mergeFrom, setMergeFrom] = useState<DivergedBranch | null>(null);
@@ -37,8 +56,14 @@ export function ProjectView({ root }: { root: string }) {
   const [dropping, setDropping] = useState(false);
   const [mergeBranch, setMergeBranch] = useState<string | null>(null);
   /** A file to show in the Files tab (e.g. from the diagram). */
-  const [focusPath, setFocusPath] = useState<string | null>(null);
+  const [focus, setFocus] = useState<{ path: string; n: number } | null>(null);
   const [addMenu, setAddMenu] = useState(false);
+  /** Files of the current version and files deleted from it, loaded per version. */
+  const [saved, setSaved] = useState<FileInfo[] | null>(null);
+  const [removed, setRemoved] = useState<RemovedFile[]>([]);
+  /** Bumped when labels change, so lists and histories load again. */
+  const [labelsVersion, setLabelsVersion] = useState(0);
+  const [draftMap, setDraftMap] = useState<Record<string, string>>(() => loadDrafts(root));
 
   // Status can take a while on big files; never run two at once, but
   // remember that another run was requested meanwhile.
@@ -103,6 +128,60 @@ export function ProjectView({ root }: { root: string }) {
     refreshAll();
   }, [refreshAll]);
 
+  const head = overview?.head ?? null;
+  useEffect(() => {
+    if (!overview) return;
+    if (!head) {
+      setSaved([]);
+      setRemoved([]);
+      return;
+    }
+    let alive = true;
+    Promise.all([api.files(root, head), api.removedFiles(root)])
+      .then(([files, gone]) => {
+        if (!alive) return;
+        setSaved(files);
+        setRemoved(gone);
+      })
+      .catch((e) => alive && toast(errorText(e), "error"));
+    return () => {
+      alive = false;
+    };
+  }, [root, head, labelsVersion, overview === null, toast]);
+
+  const files = useMemo(() => (saved && changes ? projectFiles(saved, changes) : null), [saved, changes]);
+
+  // Descriptions survive restarts, but only while their file is unsaved.
+  useEffect(() => {
+    if (!changes) return;
+    setDraftMap((d) => {
+      const kept = Object.fromEntries(Object.entries(d).filter(([path]) => changes.some((c) => c.path === path)));
+      return Object.keys(kept).length === Object.keys(d).length ? d : kept;
+    });
+  }, [changes]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(draftsKey(root), JSON.stringify(draftMap));
+    } catch {
+      // Keeping drafts across restarts is a convenience.
+    }
+  }, [root, draftMap]);
+  const drafts: Drafts = useMemo(
+    () => ({
+      all: draftMap,
+      get: (path) => draftMap[path] ?? "",
+      set: (path, text) =>
+        setDraftMap((d) => {
+          const next = { ...d };
+          if (text) next[path] = text;
+          else delete next[path];
+          return next;
+        }),
+    }),
+    [draftMap],
+  );
+  const labelsChanged = useCallback(() => setLabelsVersion((v) => v + 1), []);
+
   // Files dragged onto the window from a file manager are added.
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((e) => {
@@ -135,7 +214,7 @@ export function ProjectView({ root }: { root: string }) {
   }
 
   function openFile(path: string) {
-    setFocusPath(path);
+    setFocus((f) => ({ path, n: (f?.n ?? 0) + 1 }));
     setTab("files");
   }
 
@@ -236,8 +315,8 @@ export function ProjectView({ root }: { root: string }) {
         ))}
 
       <nav className="tabs">
-        <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
-          Изменения {count > 0 && <span className="badge">{count}</span>}
+        <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>
+          Файлы {count > 0 && <span className="badge" title="Не сохранено">{count}</span>}
         </button>
         <button className={tab === "blueprint" ? "active" : ""} onClick={() => setTab("blueprint")}>
           Схема
@@ -245,18 +324,21 @@ export function ProjectView({ root }: { root: string }) {
         <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
           История
         </button>
-        <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>
-          Файлы
-        </button>
       </nav>
 
       <div className="tab-body">
-        {tab === "changes" && (
-          <ChangesTab
+        {tab === "files" && (
+          <FilesTab
             overview={overview}
-            changes={changes}
+            files={files}
+            removed={removed}
             statusError={statusError}
+            drafts={drafts}
+            focus={focus}
+            refreshKey={labelsVersion}
             onChanged={refreshAll}
+            onLabelsChanged={labelsChanged}
+            onUploadVersion={uploadVersion}
             onAddFiles={() => pickToAdd("files")}
           />
         )}
@@ -271,9 +353,6 @@ export function ProjectView({ root }: { root: string }) {
           />
         )}
         {tab === "history" && <HistoryTab overview={overview} onChanged={refreshAll} />}
-        {tab === "files" && (
-          <FilesTab overview={overview} focusPath={focusPath} onChanged={refreshAll} onUploadVersion={uploadVersion} />
-        )}
         {dropping && (
           <div className="drop-overlay">
             <Icon name="plus" size={28} />

@@ -60,6 +60,14 @@ pub struct FileVersion {
     pub kind: ChangeKind,
 }
 
+/// A file earlier versions had and the latest one does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemovedFile {
+    pub path: String,
+    /// The latest version that still had it: where to bring it back from.
+    pub last: Hash,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Comment {
     pub id: i64,

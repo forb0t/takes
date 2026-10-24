@@ -41,6 +41,10 @@ export const prettyPath = (path: string) =>
 /** Last component of a native path (`/` or `\` separated). */
 export const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
+/** Orders paths as people do: "2. Intro" before "10. Outro". */
+const collator = new Intl.Collator("ru", { numeric: true, sensitivity: "base" });
+export const naturalCompare = (a: string, b: string) => collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
+
 export function splitPath(path: string): { dir: string; name: string } {
   const i = path.lastIndexOf("/");
   return i < 0 ? { dir: "", name: path } : { dir: path.slice(0, i + 1), name: path.slice(i + 1) };

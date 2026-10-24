@@ -11,7 +11,8 @@ use crate::error::{Error, Result};
 use crate::hash::Hash;
 use crate::merge::{self, Conflict, MergeKind, MergeOutcome, MergePreview, Resolution, ThreeWay};
 use crate::model::{
-    Branch, Change, ChangeKind, Comment, Entry, FileVersion, Snapshot, Stats, Tag, Tree, diff_trees,
+    Branch, Change, ChangeKind, Comment, Entry, FileVersion, RemovedFile, Snapshot, Stats, Tag,
+    Tree, diff_trees,
 };
 use crate::store::{self, Blob, ObjectStore};
 use crate::worktree::{self, META_DIR, WorkFile};
@@ -532,6 +533,54 @@ impl Repo {
             });
         }
         Ok(versions)
+    }
+
+    /// Files that earlier versions of `rev` (default: the current branch)
+    /// had and its latest version does not: deleted, and saved as deleted.
+    /// Sorted by path.
+    pub fn removed_files(&self, rev: Option<&str>) -> Result<Vec<RemovedFile>> {
+        let head = match rev {
+            Some(rev) => self.resolve(rev)?,
+            None => match self.head()? {
+                Some(id) => id,
+                None => return Ok(Vec::new()),
+            },
+        };
+        let graph = self.graph()?;
+        // Newest first, so the lowest index is the latest version.
+        let order: HashMap<Hash, usize> = graph
+            .topo_order(&[head])
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| (id, i))
+            .collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT e.snapshot_id, e.path FROM snapshot_entries e
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM snapshot_entries c WHERE c.snapshot_id = ?1 AND c.path = e.path
+             )",
+        )?;
+        let mut latest: HashMap<String, Hash> = HashMap::new();
+        for row in stmt.query_map([head], |r| {
+            Ok((r.get::<_, Hash>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (id, path) = row?;
+            let Some(&rank) = order.get(&id) else {
+                continue; // only on another branch
+            };
+            match latest.get(&path) {
+                Some(seen) if order[seen] <= rank => {}
+                _ => {
+                    latest.insert(path, id);
+                }
+            }
+        }
+        let mut removed: Vec<RemovedFile> = latest
+            .into_iter()
+            .map(|(path, last)| RemovedFile { path, last })
+            .collect();
+        removed.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(removed)
     }
 
     /// What a version changed compared to its first parent.

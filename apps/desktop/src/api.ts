@@ -55,6 +55,12 @@ export interface FileVersion {
   labels: string[];
 }
 
+/** A file deleted and saved as deleted; `last` is the version to bring it back from. */
+export interface RemovedFile {
+  path: string;
+  last: string;
+}
+
 /** A version with what it changed, for the diagram. */
 export interface GraphVersion extends Snapshot {
   changes: Change[];
@@ -222,9 +228,12 @@ export const api = {
 
   overview: (root: string) => invoke<Overview>("overview", { root }),
   status: (root: string) => invoke<Change[]>("status", { root }),
-  /** Saves each changed file under `paths` as a version of its own; returns them oldest first. */
-  commit: (root: string, message: string | null, paths: string[]) =>
-    invoke<string[]>("commit", { root, message, paths }),
+  /**
+   * Saves each changed file under `paths` (all if empty) as a version of its
+   * own, described by `messages[path]` or automatically; returns them oldest first.
+   */
+  commit: (root: string, paths: string[], messages: Record<string, string>) =>
+    invoke<string[]>("commit", { root, paths, messages }),
   importFiles: (
     root: string,
     sources: string[],
@@ -243,6 +252,7 @@ export const api = {
   snapshotChanges: (root: string, id: string) => invoke<Change[]>("snapshot_changes", { root, id }),
   files: (root: string, rev: string) => invoke<FileInfo[]>("files", { root, rev }),
   fileHistory: (root: string, path: string) => invoke<FileVersion[]>("file_history", { root, path }),
+  removedFiles: (root: string) => invoke<RemovedFile[]>("removed_files", { root }),
   stats: (root: string) => invoke<Stats>("stats", { root }),
   cleanup: (root: string, olderThanDays: number | null, dryRun: boolean) =>
     invoke<Cleanup>("cleanup", { root, olderThanDays, dryRun }),

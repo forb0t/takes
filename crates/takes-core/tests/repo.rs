@@ -904,3 +904,28 @@ fn a_file_with_another_name_becomes_a_new_version() {
         Err(Error::InvalidPath(_))
     ));
 }
+
+#[test]
+fn removed_files_can_be_found_and_brought_back() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "a.wav", "a");
+    write(&repo, "old/b.wav", "b1");
+    repo.commit("both", &[]).unwrap();
+    write(&repo, "old/b.wav", "b2");
+    let with_b = repo.commit("b again", &[]).unwrap();
+    fs::remove_file(repo.root().join("old/b.wav")).unwrap();
+    repo.commit("drop b", &[]).unwrap();
+    // Only on another branch: not removed from this one.
+    repo.branch_off("idea", None).unwrap();
+    write(&repo, "idea.wav", "i");
+    repo.commit("idea", &[]).unwrap();
+    repo.switch("main").unwrap();
+
+    let removed = repo.removed_files(None).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].path, "old/b.wav");
+    assert_eq!(removed[0].last, with_b);
+    repo.restore("old/b.wav", &removed[0].last.to_hex(), None, false)
+        .unwrap();
+    assert_eq!(read(&repo, "old/b.wav"), b"b2");
+}

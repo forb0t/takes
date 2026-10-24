@@ -161,25 +161,35 @@ fn auto_message(change: &takes_core::Change) -> String {
 }
 
 /// Saves the changed files under `paths` (all if empty), each as a version
-/// of its own. Without a message, each version is named after its change.
-fn save_each(repo: &mut Repo, paths: &[&str], message: Option<&str>) -> CmdResult<Vec<String>> {
-    let message = message.map(str::trim).filter(|m| !m.is_empty());
-    let ids = repo.commit_each(paths, |change| match message {
-        Some(m) => m.to_owned(),
-        None => auto_message(change),
+/// of its own, described by `message` for its path; a version nobody
+/// described is named after its change.
+fn save_each(
+    repo: &mut Repo,
+    paths: &[&str],
+    message: impl Fn(&str) -> Option<String>,
+) -> CmdResult<Vec<String>> {
+    let ids = repo.commit_each(paths, |change| {
+        message(&change.path)
+            .map(|m| m.trim().to_owned())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| auto_message(change))
     })?;
     Ok(ids.iter().map(|id| id.to_hex()).collect())
 }
 
+/// Saves the changed files under `paths` (all if empty), each as a version
+/// of its own with its description from `messages` (path → text).
 #[tauri::command]
 pub async fn commit(
     root: String,
-    message: Option<String>,
     paths: Vec<String>,
+    messages: HashMap<String, String>,
 ) -> CmdResult<Vec<String>> {
     blocking(move || {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-        save_each(&mut open(&root)?, &paths, message.as_deref())
+        save_each(&mut open(&root)?, &paths, |path| {
+            messages.get(path).cloned()
+        })
     })
     .await
 }
@@ -208,7 +218,7 @@ pub async fn import_files(
         };
         let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
         let saved = if save && !paths.is_empty() {
-            match save_each(&mut repo, &paths, message.as_deref()) {
+            match save_each(&mut repo, &paths, |_| message.clone()) {
                 Ok(ids) => ids.len(),
                 // The copies are identical to what is saved.
                 Err(e) if e.kind == "nothingToCommit" => 0,
@@ -294,6 +304,22 @@ pub async fn files(root: String, rev: String) -> CmdResult<Vec<FileDto>> {
                 path,
                 size: e.size,
                 labels: labels(&meta, Some(e.blob)),
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Files the current branch had in earlier versions and no longer has.
+#[tauri::command]
+pub async fn removed_files(root: String) -> CmdResult<Vec<RemovedFileDto>> {
+    blocking(move || {
+        Ok(open(&root)?
+            .removed_files(None)?
+            .into_iter()
+            .map(|r| RemovedFileDto {
+                path: r.path,
+                last: r.last.to_hex(),
             })
             .collect())
     })

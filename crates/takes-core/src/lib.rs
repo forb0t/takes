@@ -27,7 +27,8 @@ pub use error::{Error, Result};
 pub use hash::Hash;
 pub use merge::{Conflict, MergeKind, MergeOutcome, MergePreview, Resolution};
 pub use model::{
-    Branch, Change, ChangeKind, Comment, Entry, FileVersion, Snapshot, Stats, Tag, Tree,
+    Branch, Change, ChangeKind, Comment, Entry, FileVersion, RemovedFile, Snapshot, Stats, Tag,
+    Tree,
 };
 pub use remote::{FolderStorage, RemoteConfig, Storage, WebDavStorage};
 pub use repo::{

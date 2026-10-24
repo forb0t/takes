@@ -262,7 +262,12 @@ mockIPC(
       case "history_graph":
         return params.has("empty") ? [] : graph;
       case "commit":
-        return [id(30)];
+        return (a.paths as string[]).length > 0 ? [id(30)] : status.map((_, i) => id(30 + i));
+      case "removed_files":
+        return [
+          { path: "03 Рассвет/old_take.wav", last: id(3) },
+          { path: "Черновики/идеи.txt", last: id(2) },
+        ];
       case "import_files":
         return { paths: ["Stems/bass.wav", "Ночь.wav"], replaced: 1, saved: 2 };
       case "cleanup":

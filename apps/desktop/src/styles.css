@@ -855,27 +855,66 @@ input[type="checkbox"]:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- changes tab ------------------------------------------------------------- */
+/* ---- files: unsaved work ------------------------------------------------------ */
 
-.changes {
+.pending textarea:focus,
+.field input:focus,
+.search:focus {
+  border-color: var(--accent);
+}
+
+.empty-actions {
   display: flex;
-  flex-direction: column;
-  height: 100%;
+  justify-content: center;
+  gap: 8px;
 }
 
-.changes .list {
-  flex: 1;
+/* "Не сохранено: 15 · только они · Сохранить все" above the file list. */
+.unsaved-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+  font-size: 12.5px;
+  white-space: nowrap;
 }
 
-.composer {
-  padding: 12px 16px 14px;
-  border-top: 1px solid var(--border);
+.unsaved-strip .btn {
+  margin-left: auto;
+}
+
+/* The unsaved state of one file, with its description and save button. */
+.pending {
+  margin: 16px 0 18px;
+  padding: 12px 14px 12px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--modified);
+  border-radius: var(--radius);
   background: var(--panel);
 }
 
-.composer textarea {
+.pending-added {
+  border-left-color: var(--added);
+}
+
+.pending-deleted {
+  border-left-color: var(--deleted);
+}
+
+.pending-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.pending textarea {
   width: 100%;
-  resize: none;
+  resize: vertical;
   padding: 10px 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -883,14 +922,9 @@ input[type="checkbox"]:disabled {
   outline: none;
 }
 
-.composer textarea:focus,
-.field input:focus,
-.search:focus {
-  border-color: var(--accent);
-}
-
-.composer-bar {
+.pending-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -898,58 +932,36 @@ input[type="checkbox"]:disabled {
   font-size: 12.5px;
 }
 
-.composer-bar > .muted {
+.pending-bar > .muted {
   margin-right: auto;
 }
 
-.composer-target {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  font-size: 13px;
+.status-pill {
+  padding: 1px 8px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
-.row.selectable {
-  cursor: pointer;
+.status-pill.saved {
+  color: var(--added);
+  background: rgba(95, 209, 139, 0.12);
 }
 
-.row.selectable:hover {
-  background: var(--hover);
+.status-pill.modified {
+  color: var(--modified);
+  background: rgba(242, 195, 91, 0.13);
 }
 
-.row.selected,
-.row.selected:hover {
-  background: var(--accent-soft);
+.status-pill.added {
+  color: var(--added);
+  background: rgba(95, 209, 139, 0.12);
 }
 
-/* One file at a time: a round marker, not a checkbox. */
-.radio {
-  display: inline-grid;
-  place-content: center;
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  border: 1.5px solid var(--border-strong);
-  border-radius: 50%;
-}
-
-.row.selected .radio {
-  border-color: var(--accent);
-}
-
-.row.selected .radio::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.empty-actions {
-  display: flex;
-  justify-content: center;
-  gap: 8px;
+.status-pill.deleted,
+.status-pill.removed {
+  color: var(--deleted);
+  background: rgba(240, 113, 120, 0.12);
 }
 
 /* ---- split views (history, files) ------------------------------------------------ */
@@ -1176,6 +1188,54 @@ input[type="checkbox"]:disabled {
   color: var(--accent);
 }
 
+/* Lines up names whether or not a file shows a change badge. */
+.kind-space {
+  flex-shrink: 0;
+  width: 18px;
+}
+
+.file.status-deleted .file-name {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+.file.removed .file-name {
+  color: var(--faint);
+}
+
+.draft-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.removed-group {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.removed-toggle {
+  width: 100%;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.removed-toggle:hover {
+  color: var(--muted);
+}
+
+.removed-toggle .chevron {
+  display: inline-flex;
+  margin-left: auto;
+  transform: rotate(-90deg);
+  transition: transform 0.15s;
+}
+
+.removed-toggle .chevron.open {
+  transform: none;
+}
+
 /* The name keeps a few letters however many labels the file has. */
 .file-name {
   flex: 1 1 auto;
@@ -1210,6 +1270,12 @@ input[type="checkbox"]:disabled {
 
 .version .row-actions .btn-ghost {
   opacity: 1;
+}
+
+/* The version picked on the diagram. */
+.version.highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
 .version-main {
