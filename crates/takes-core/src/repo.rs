@@ -640,11 +640,50 @@ impl Repo {
 
     /// What a version changed compared to its first parent.
     pub fn changes_in(&self, id: Hash) -> Result<Vec<Change>> {
-        let before = match self.parents(id)?.first() {
-            Some(parent) => self.tree(*parent)?,
+        Ok(self
+            .changes_with_files(id)?
+            .into_iter()
+            .map(|(change, _)| change)
+            .collect())
+    }
+
+    /// What a version changed compared to its first parent, each change with
+    /// the file as it is in the version (none for a deletion). Only the rows
+    /// that differ are read, so it stays quick for versions of many files.
+    pub fn changes_with_files(&self, id: Hash) -> Result<Vec<(Change, Option<Entry>)>> {
+        let parent = self.parents(id)?.first().copied();
+        // Files of `of` that `other` does not have exactly so.
+        let differing = |of: Hash, other: Option<Hash>| -> Result<Tree> {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT path, blob_hash, size FROM snapshot_entries e
+                 WHERE e.snapshot_id = ?1 AND NOT EXISTS (
+                     SELECT 1 FROM snapshot_entries o
+                     WHERE o.snapshot_id = ?2 AND o.path = e.path AND o.blob_hash = e.blob_hash
+                 )",
+            )?;
+            let rows = stmt.query_map(params![of, other], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    Entry {
+                        blob: r.get(1)?,
+                        size: r.get::<_, i64>(2)? as u64,
+                    },
+                ))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let after = differing(id, parent)?;
+        let before = match parent {
+            Some(parent) => differing(parent, Some(id))?,
             None => Tree::new(),
         };
-        Ok(diff_trees(&before, &self.tree(id)?))
+        Ok(diff_trees(&before, &after)
+            .into_iter()
+            .map(|change| {
+                let file = after.get(&change.path).copied();
+                (change, file)
+            })
+            .collect())
     }
 
     /// A file as stored in a version.
@@ -873,12 +912,35 @@ impl Repo {
         Ok(blob)
     }
 
-    fn ensure_clean(&self) -> Result<()> {
-        let changes = self.status()?;
-        if changes.is_empty() {
+    /// Unsaved changes that stop the folder from going from `from` to `to`:
+    /// any change to a saved file, and new files where `to` puts one. Other
+    /// new files simply stay.
+    fn unsaved_in_the_way(&self, from: &Tree, to: &Tree) -> Result<Vec<Change>> {
+        let touched: HashSet<&str> = from
+            .iter()
+            .filter(|(p, e)| to.get(*p) != Some(*e))
+            .map(|(p, _)| p.as_str())
+            .chain(
+                to.keys()
+                    .filter(|p| !from.contains_key(*p))
+                    .map(String::as_str),
+            )
+            .collect();
+        Ok(self
+            .status()?
+            .into_iter()
+            .filter(|c| c.kind != ChangeKind::Added || touched.contains(c.path.as_str()))
+            .collect())
+    }
+
+    /// Refuses when unsaved work is in the way of making the folder go from
+    /// `from` to `to`.
+    fn ensure_free(&self, from: &Tree, to: &Tree) -> Result<()> {
+        let dirty = self.unsaved_in_the_way(from, to)?;
+        if dirty.is_empty() {
             Ok(())
         } else {
-            Err(Error::DirtyWorktree(changes))
+            Err(Error::DirtyWorktree(dirty))
         }
     }
 
@@ -1045,10 +1107,7 @@ impl Repo {
         let _lock = self.lock_shared()?;
         if self.head()? != Some(target) {
             let (from, to) = (self.head_tree()?, self.tree(target)?);
-            let dirty = self.unsaved_in_the_way(&from, &to)?;
-            if !dirty.is_empty() {
-                return Err(Error::DirtyWorktree(dirty));
-            }
+            self.ensure_free(&from, &to)?;
             self.apply_tree(&from, &to)?;
         }
         self.conn
@@ -1314,8 +1373,9 @@ impl Repo {
         match self.plan_merge(rev)? {
             MergePlan::UpToDate => Ok(MergeOutcome::UpToDate),
             MergePlan::FastForward { ours_tree, theirs } => {
-                self.ensure_clean()?;
-                self.apply_tree(&ours_tree, &self.tree(theirs)?)?;
+                let theirs_tree = self.tree(theirs)?;
+                self.ensure_free(&ours_tree, &theirs_tree)?;
+                self.apply_tree(&ours_tree, &theirs_tree)?;
                 self.conn
                     .execute(UPSERT_REF, params![BRANCH, branch, theirs])?;
                 Ok(MergeOutcome::FastForward(theirs))
@@ -1330,7 +1390,7 @@ impl Repo {
                     Ok(merged) => merged,
                     Err(open) => return Ok(MergeOutcome::Conflicts(open)),
                 };
-                self.ensure_clean()?;
+                self.ensure_free(&ours_tree, &merged)?;
                 self.apply_tree(&ours_tree, &merged)?;
                 let message = format!("Merge '{rev}' into '{branch}'");
                 let id = self.write_snapshot(&branch, &[ours, theirs], &message, &merged, &[])?;

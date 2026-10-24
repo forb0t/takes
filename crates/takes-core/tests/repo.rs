@@ -616,6 +616,11 @@ fn pruning_keeps_history_but_frees_old_takes() {
     repo.create_tag("demo", "HEAD~2").unwrap();
     let log = repo.log(None).unwrap();
 
+    // Versions the app asks to keep keep their files too.
+    let keep = [repo.resolve("HEAD~1").unwrap()].into();
+    let plan = repo.cleanup_keeping(Some(i64::MAX), true, &keep).unwrap();
+    assert_eq!(plan.contents, 0);
+
     let freed = repo.cleanup(Some(i64::MAX), false).unwrap();
     assert_eq!(freed.versions, 0);
     // Take 2 alone is neither the latest nor tagged.

@@ -3,13 +3,12 @@
 //! not in the folder is saved off the folder's line, on a ref of its own,
 //! and a variant is brought into the folder as the song's next version.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use super::{BRANCH, Repo, now_ns};
 use crate::error::{Error, Result};
 use crate::hash::Hash;
-use crate::model::{Change, ChangeKind, Entry, Tree};
+use crate::model::Entry;
 
 /// Refs that keep versions not in the folder's history.
 pub const TAKE_PREFIX: &str = "take/";
@@ -68,26 +67,5 @@ impl Repo {
             Err(Error::NothingToCommit) => Ok(None),
             Err(e) => Err(e),
         }
-    }
-
-    /// Unsaved changes that stop the folder from going from `from` to `to`:
-    /// any change to a saved file, and new files where `to` puts one. Other
-    /// new files simply stay.
-    pub(super) fn unsaved_in_the_way(&self, from: &Tree, to: &Tree) -> Result<Vec<Change>> {
-        let touched: HashSet<&str> = from
-            .iter()
-            .filter(|(p, e)| to.get(*p) != Some(*e))
-            .map(|(p, _)| p.as_str())
-            .chain(
-                to.keys()
-                    .filter(|p| !from.contains_key(*p))
-                    .map(String::as_str),
-            )
-            .collect();
-        Ok(self
-            .status()?
-            .into_iter()
-            .filter(|c| c.kind != ChangeKind::Added || touched.contains(c.path.as_str()))
-            .collect())
     }
 }

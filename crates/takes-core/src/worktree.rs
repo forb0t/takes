@@ -26,18 +26,8 @@ pub struct WorkFile {
 /// Fails instead of skipping unreadable directories: a silently skipped folder
 /// would look like deleted files and could be saved as a deletion.
 pub fn scan(root: &Path) -> Result<Vec<WorkFile>> {
-    let walker = WalkBuilder::new(root)
-        .standard_filters(false)
-        .add_custom_ignore_filename(IGNORE_FILE)
-        .follow_links(false)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !(name == META_DIR || name.ends_with(TMP_SUFFIX) || BUILTIN_IGNORES.contains(&&*name))
-        })
-        .build();
-
     let mut files = Vec::new();
-    for entry in walker {
+    for entry in walk(root, true) {
         let entry = entry.map_err(|e| io::Error::other(e.to_string()))?;
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -58,16 +48,8 @@ pub fn scan(root: &Path) -> Result<Vec<WorkFile>> {
 /// relative to it, skipping what a project never tracks (a `.takes` folder
 /// of another project, OS clutter).
 pub fn files_in(dir: &Path) -> Result<Vec<(PathBuf, String)>> {
-    let walker = WalkBuilder::new(dir)
-        .standard_filters(false)
-        .follow_links(false)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !(name == META_DIR || name.ends_with(TMP_SUFFIX) || BUILTIN_IGNORES.contains(&&*name))
-        })
-        .build();
     let mut files = Vec::new();
-    for entry in walker {
+    for entry in walk(dir, false) {
         let entry = entry.map_err(|e| io::Error::other(e.to_string()))?;
         if entry.file_type().is_some_and(|t| t.is_file()) {
             let abs = entry.into_path();
@@ -76,6 +58,23 @@ pub fn files_in(dir: &Path) -> Result<Vec<(PathBuf, String)>> {
         }
     }
     Ok(files)
+}
+
+/// Everything under `dir` but what a project never tracks: a `.takes`
+/// folder, files being written by a checkout, OS clutter, and (in a project)
+/// what its ignore file lists.
+fn walk(dir: &Path, project: bool) -> ignore::Walk {
+    let mut builder = WalkBuilder::new(dir);
+    builder.standard_filters(false).follow_links(false);
+    if project {
+        builder.add_custom_ignore_filename(IGNORE_FILE);
+    }
+    builder
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(name == META_DIR || name.ends_with(TMP_SUFFIX) || BUILTIN_IGNORES.contains(&&*name))
+        })
+        .build()
 }
 
 fn rel_path(root: &Path, abs: &Path) -> Result<String> {

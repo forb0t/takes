@@ -1,5 +1,5 @@
-//! Tells the UI when files in the open project change, so the "Changes" list
-//! updates while you work in your DAW.
+//! Tells the UI when files in the open project change, so the Files tab and
+//! the diagram update while you work in your DAW.
 
 use std::path::Path;
 use std::sync::Mutex;

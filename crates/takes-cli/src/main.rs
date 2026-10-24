@@ -7,7 +7,8 @@ use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use takes_core::{
     Blocked, Change, ChangeKind, Conflict, Entry, Error, Hash, MergeKind, MergeOutcome,
-    RemoteConfig, Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport, decode_text,
+    RemoteConfig, Repo, Resolution, Storage, SyncPhase, SyncProgress, SyncReport, TAKE_PREFIX,
+    decode_text,
 };
 
 #[derive(Parser)]
@@ -424,7 +425,12 @@ fn run(command: Command) -> Result<ExitCode> {
 
         Command::Branch { name: None, .. } => {
             let repo = open()?;
-            for branch in repo.branches()? {
+            // Refs keeping songs' takes beside the folder are the app's business.
+            for branch in repo
+                .branches()?
+                .into_iter()
+                .filter(|b| !b.name.starts_with(TAKE_PREFIX))
+            {
                 let marker = if branch.current { "*" } else { " " };
                 let head = branch
                     .head

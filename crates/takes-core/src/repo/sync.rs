@@ -366,6 +366,7 @@ impl Repo {
              DELETE FROM remote_refs; DELETE FROM remote_seen; DELETE FROM remote_deleted;
              UPDATE comments SET pushed = 0, resolution_pushed = 0;
              UPDATE meta_events SET pushed = 0;
+             UPDATE setting_events SET pushed = 0;
              DELETE FROM config WHERE key = 'sync.last';
              COMMIT;",
         )?;
@@ -1300,12 +1301,13 @@ impl Repo {
     }
 
     fn fast_forward_current(&mut self, ours: Option<Hash>, theirs: Hash) -> Result<()> {
-        self.ensure_clean()?;
         let from = match ours {
             Some(id) => self.tree(id)?,
             None => Tree::new(),
         };
-        self.apply_tree(&from, &self.tree(theirs)?)?;
+        let to = self.tree(theirs)?;
+        self.ensure_free(&from, &to)?;
+        self.apply_tree(&from, &to)?;
         let branch = self.current_branch()?;
         self.conn
             .execute(UPSERT_REF, params![BRANCH, branch, theirs])?;

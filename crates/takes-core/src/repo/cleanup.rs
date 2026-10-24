@@ -35,6 +35,17 @@ impl Repo {
     /// versions stay in the history, but their files can no longer be
     /// played or restored here. With `dry_run` nothing changes.
     pub fn cleanup(&mut self, prune_before: Option<i64>, dry_run: bool) -> Result<Cleanup> {
+        self.cleanup_keeping(prune_before, dry_run, &HashSet::new())
+    }
+
+    /// Like [`Repo::cleanup`], also keeping the file data of `keep`: versions
+    /// the app holds dear, such as the latest take of every song's branch.
+    pub fn cleanup_keeping(
+        &mut self,
+        prune_before: Option<i64>,
+        dry_run: bool,
+        keep: &HashSet<Hash>,
+    ) -> Result<Cleanup> {
         let _lock = self.lock_exclusive()?;
         let graph = self.graph()?;
         let (me, _) = self.device()?;
@@ -90,6 +101,7 @@ impl Repo {
                 .iter()
                 .filter(|id| {
                     heads.contains(*id)
+                        || keep.contains(*id)
                         || open_comments.contains(*id)
                         || graph.time_of(id) >= before
                 })

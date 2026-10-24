@@ -230,11 +230,14 @@ fn unsaved_work_is_never_overwritten() {
     assert_eq!(read(&studio, "song.wav"), b"studio edit, not saved");
     assert_eq!(studio.sync_state().unwrap().waiting, ["main"]);
 
-    // Throw the edit away and sync again: now it updates.
+    // Throw the edit away and sync again: now it updates. A new file not
+    // saved yet is not in the way; it stays as it is.
     studio.restore("song.wav", "HEAD", None, true).unwrap();
+    write(&studio, "idea.wav", "new idea, not saved");
     let report = world.sync(&mut studio);
     assert_eq!(report.current_blocked, None);
     assert_eq!(read(&studio, "song.wav"), b"v2");
+    assert_eq!(read(&studio, "idea.wav"), b"new idea, not saved");
 }
 
 #[test]
@@ -507,6 +510,35 @@ fn shared_settings_travel_and_the_latest_change_wins() {
             .any(|w| w.starts_with("settings/"))
     );
     assert!(laptop.set_shared_setting("bad key!", "x").is_err());
+
+    // Changed again and again before a sync, only the last change travels.
+    for n in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        laptop
+            .set_shared_setting("canvas.layout", &format!("{{\"n\":{n}}}"))
+            .unwrap();
+    }
+    world.remote.take_writes();
+    world.sync(&mut laptop);
+    let sent = world.remote.take_writes();
+    assert_eq!(
+        sent.iter().filter(|w| w.starts_with("settings/")).count(),
+        1
+    );
+
+    // A new remote gets every setting there is.
+    let other = World::new();
+    laptop.set_remote(Some(&other.config)).unwrap();
+    other.sync(&mut laptop);
+    let moved = other.clone("tablet");
+    assert_eq!(
+        moved.shared_setting("songs.order").unwrap().as_deref(),
+        Some(r#"["a.wav","b.wav"]"#)
+    );
+    assert_eq!(
+        moved.shared_setting("canvas.layout").unwrap().as_deref(),
+        Some(r#"{"n":4}"#)
+    );
 }
 
 #[test]

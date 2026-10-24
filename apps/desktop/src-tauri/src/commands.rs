@@ -3,7 +3,7 @@
 //! Each call opens the project afresh (cheap: one SQLite connection) and runs
 //! on a blocking thread, since status and saving may hash gigabytes of audio.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -254,35 +254,34 @@ pub async fn history_graph(root: String) -> CmdResult<Vec<GraphVersionDto>> {
         repo.all_versions()?
             .iter()
             .map(|s| {
-                let changes = repo.changes_in(s.id)?;
-                let tree = if changes
-                    .iter()
-                    .any(|c| c.kind != takes_core::ChangeKind::Deleted)
-                {
-                    repo.tree(s.id)?
-                } else {
-                    Default::default()
-                };
                 Ok(GraphVersionDto {
                     snapshot: s.into(),
-                    changes: changes
-                        .iter()
-                        .map(|c| {
-                            let entry = tree.get(&c.path);
-                            ChangeDto {
-                                size: entry.map(|e| e.size),
-                                blob: entry.map(|e| e.blob.to_hex()),
-                                pruned: entry.is_some_and(|e| pruned.contains(&e.blob)),
-                                labels: labels(&meta, entry.map(|e| e.blob)),
-                                ..c.into()
-                            }
-                        })
-                        .collect(),
+                    changes: changes_dto(&repo, s.id, &pruned, &meta)?,
                 })
             })
             .collect()
     })
     .await
+}
+
+/// What a version changed, with sizes, labels and contents of the new files.
+fn changes_dto(
+    repo: &Repo,
+    id: Hash,
+    pruned: &HashSet<Hash>,
+    meta: &HashMap<Hash, takes_core::FileMeta>,
+) -> CmdResult<Vec<ChangeDto>> {
+    Ok(repo
+        .changes_with_files(id)?
+        .iter()
+        .map(|(c, file)| ChangeDto {
+            size: file.map(|e| e.size),
+            blob: file.map(|e| e.blob.to_hex()),
+            pruned: file.is_some_and(|e| pruned.contains(&e.blob)),
+            labels: labels(meta, file.map(|e| e.blob)),
+            ..c.into()
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -303,22 +302,7 @@ pub async fn snapshot_changes(root: String, id: String) -> CmdResult<Vec<ChangeD
     blocking(move || {
         let repo = open(&root)?;
         let id = repo.resolve(&id)?;
-        let tree = repo.tree(id)?;
-        let pruned = repo.pruned()?;
-        let meta = repo.all_file_meta()?;
-        Ok(repo
-            .changes_in(id)?
-            .iter()
-            .map(|c| {
-                let entry = tree.get(&c.path);
-                ChangeDto {
-                    size: entry.map(|e| e.size),
-                    pruned: entry.is_some_and(|e| pruned.contains(&e.blob)),
-                    labels: labels(&meta, entry.map(|e| e.blob)),
-                    ..c.into()
-                }
-            })
-            .collect())
+        changes_dto(&repo, id, &repo.pruned()?, &repo.all_file_meta()?)
     })
     .await
 }
@@ -400,12 +384,14 @@ pub async fn stats(root: String) -> CmdResult<StatsDto> {
 }
 
 /// Frees space; `older_than_days` also removes the files of old
-/// intermediate versions. With `dry_run`, only says how much would go.
+/// intermediate versions, except those in `keep` (the latest take of every
+/// song's branch). With `dry_run`, only says how much would go.
 #[tauri::command]
 pub async fn cleanup(
     root: String,
     older_than_days: Option<u32>,
     dry_run: bool,
+    keep: Vec<String>,
 ) -> CmdResult<CleanupDto> {
     blocking(move || {
         let before = older_than_days.map(|days| {
@@ -414,7 +400,12 @@ pub async fn cleanup(
                 .map_or(0, |d| d.as_secs() as i64);
             now - i64::from(days) * 24 * 60 * 60
         });
-        Ok(open(&root)?.cleanup(before, dry_run)?.into())
+        let mut repo = open(&root)?;
+        let keep = keep
+            .iter()
+            .map(|id| repo.resolve(id))
+            .collect::<Result<HashSet<_>, _>>()?;
+        Ok(repo.cleanup_keeping(before, dry_run, &keep)?.into())
     })
     .await
 }
@@ -435,26 +426,6 @@ pub async fn set_author(root: String, name: String) -> CmdResult<()> {
 #[tauri::command]
 pub async fn switch_branch(root: String, name: String) -> CmdResult<()> {
     blocking(move || Ok(open(&root)?.switch(&name)?)).await
-}
-
-#[tauri::command]
-pub async fn create_branch(
-    root: String,
-    name: String,
-    from: Option<String>,
-    switch_to: bool,
-) -> CmdResult<()> {
-    blocking(move || {
-        let mut repo = open(&root)?;
-        // Together, so a failed switch does not leave the name taken.
-        if switch_to {
-            repo.branch_off(name.trim(), from.as_deref())?;
-        } else {
-            repo.create_branch(name.trim(), from.as_deref())?;
-        }
-        Ok(())
-    })
-    .await
 }
 
 /// Saves a file from outside as a version of a song's variant after version
@@ -495,11 +466,6 @@ pub async fn use_take(
             .map(|id| id.to_hex()))
     })
     .await
-}
-
-#[tauri::command]
-pub async fn delete_branch(root: String, name: String) -> CmdResult<()> {
-    blocking(move || Ok(open(&root)?.delete_branch(&name)?)).await
 }
 
 #[tauri::command]
@@ -648,6 +614,7 @@ pub async fn preview_file(
     let cache = app.path().app_cache_dir()?.join("previews");
     blocking(move || {
         let repo = open(&root)?;
+        // The file on disk is shown as it is, without reading it through.
         let file = match rev {
             None => repo.abs(&path)?,
             Some(rev) => extract_version(&repo, &cache, &rev, &path)?.0,
