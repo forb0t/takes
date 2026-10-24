@@ -9,9 +9,9 @@ import {
   type Overview,
   type RemovedFile,
 } from "../api";
-import { CompareButton, PlayButton } from "../player";
+import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast } from "../ui";
-import { formatDate, formatSize, naturalCompare, plural, short, splitPath } from "../util";
+import { formatDate, formatSize, naturalCompare, plural, previewKind, short, splitPath } from "../util";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { useFileActions } from "./useFileActions";
 
@@ -102,6 +102,9 @@ export function FilesTab({
   const [onlyUnsaved, setOnlyUnsaved] = useState(false);
   const [showRemoved, setShowRemoved] = useState(false);
   const [savingAll, setSavingAll] = useState(false);
+  /** Enter in the list: put the cursor into that file's description. */
+  const [focusRequest, setFocusRequest] = useState<{ path: string; n: number } | null>(null);
+  const items = useRef(new Map<string, HTMLButtonElement>());
 
   // A file deleted and saved, then put back, is in the list again.
   const removedHere = useMemo(
@@ -139,6 +142,31 @@ export function FilesTab({
   }, [files, query, onlyUnsaved]);
 
   if (onlyUnsaved && unsaved.length === 0 && files) setOnlyUnsaved(false);
+
+  /** ↑ and ↓ walk the list, Enter goes on to describing the file. */
+  function onListKey(e: React.KeyboardEvent) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return;
+    e.preventDefault();
+    if (!selected) return;
+    if (e.key === "Enter") {
+      setFocusRequest((r) => ({ path: selected, n: (r?.n ?? 0) + 1 }));
+      return;
+    }
+    const order = [
+      ...groups.flatMap(([, list]) => list.map((f) => f.path)),
+      ...(showRemoved && !onlyUnsaved ? removedHere.map((r) => r.path) : []),
+    ];
+    const at = order.indexOf(selected);
+    const next = order[Math.min(Math.max(at + (e.key === "ArrowDown" ? 1 : -1), 0), order.length - 1)];
+    if (next) {
+      setSelected(next);
+      items.current.get(next)?.focus();
+    }
+  }
+  const keep = (path: string) => (el: HTMLButtonElement | null) => {
+    if (el) items.current.set(path, el);
+    else items.current.delete(path);
+  };
 
   async function saveAll() {
     if (savingAll) return;
@@ -216,7 +244,13 @@ export function FilesTab({
             </button>
           </div>
         )}
-        <div className="scroll" role="listbox" aria-label="Файлы проекта">
+        <div
+          className="scroll"
+          role="listbox"
+          aria-label="Файлы проекта"
+          title="↑ ↓ — выбрать файл, Enter — описать изменения"
+          onKeyDown={onListKey}
+        >
           {groups.map(([dir, list]) => (
             <div key={dir} className="file-group">
               {dir && (
@@ -227,6 +261,7 @@ export function FilesTab({
               {list.map((f) => (
                 <button
                   key={f.path}
+                  ref={keep(f.path)}
                   role="option"
                   aria-selected={f.path === selected}
                   className={`file status-${f.status} ${f.path === selected ? "selected" : ""} ${dir ? "nested" : ""}`}
@@ -260,6 +295,7 @@ export function FilesTab({
                 removedHere.map((r) => (
                   <button
                     key={r.path}
+                    ref={keep(r.path)}
                     className={`file removed ${r.path === selected ? "selected" : ""}`}
                     onClick={() => setSelected(r.path)}
                   >
@@ -283,6 +319,7 @@ export function FilesTab({
             removed={selectedRemoved}
             drafts={drafts}
             refreshKey={refreshKey}
+            focusDraft={focusRequest?.path === selected ? focusRequest.n : 0}
             onChanged={onChanged}
             onLabelsChanged={onLabelsChanged}
             onUploadVersion={() => onUploadVersion(selected)}
@@ -348,6 +385,10 @@ export function FileDetail({
   const [editing, setEditing] = useState<FileVersion | null>(null);
   const [saving, setSaving] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  /** A version picked to be compared with another one. */
+  const [pick, setPick] = useState<FileVersion | null>(null);
+  const player = usePlayer();
+  const comparable = previewKind(path) !== null;
   const draftBox = useRef<HTMLTextAreaElement>(null);
   const highlighted = useRef<HTMLDivElement>(null);
 
@@ -393,6 +434,24 @@ export function FileDetail({
     } finally {
       setSaving(false);
     }
+  }
+
+  const versionTrack = (v: FileVersion): Track => ({
+    root,
+    rev: v.snapshot.id,
+    path: v.path,
+    label: `${short(v.snapshot.id)} · ${v.snapshot.message || "без описания"}`,
+  });
+
+  /** Opens two versions side by side, the older one as A; `null` is the file on disk. */
+  function compare(a: FileVersion, b: FileVersion | null) {
+    setPick(null);
+    const older = versions && b && versions.indexOf(b) > versions.indexOf(a) ? b : a;
+    const newer = older === a ? b : a;
+    player.open([
+      versionTrack(older!),
+      newer ? versionTrack(newer) : { root, rev: null, path, label: "Сейчас на диске (не сохранено)" },
+    ]);
   }
 
   async function rename(to: string) {
@@ -534,6 +593,22 @@ export function FileDetail({
         Версии файла{versions ? ` · ${versions.length}` : ""}
         {rev && <span className="muted"> · по истории выбранной версии (другая ветка)</span>}
       </div>
+      {pick && (
+        <div className="pick-strip">
+          <span>
+            Сравнение: выбрана <b>{short(pick.snapshot.id)}</b> · {pick.snapshot.message || "без описания"}. Выберите
+            вторую версию
+          </span>
+          {file && (pending === "modified" || pending === "renamed") && (
+            <button className="btn btn-small" onClick={() => compare(pick, null)}>
+              или файл на диске
+            </button>
+          )}
+          <button className="btn btn-small btn-ghost" onClick={() => setPick(null)}>
+            Отмена
+          </button>
+        </div>
+      )}
       {error && <div className="error-text">{error}</div>}
       {versions?.length === 0 && (
         <div className="muted">Сохранённых версий ещё нет — сохраните файл, и здесь начнётся его история.</div>
@@ -577,6 +652,19 @@ export function FileDetail({
               </div>
               {exists && (
                 <div className="row-actions">
+                  {comparable && versions.length > 1 && (
+                    <button
+                      className={`btn btn-small btn-ghost ${pick === v ? "picked" : ""}`}
+                      title={
+                        pick && pick !== v
+                          ? "Сравнить эту версию с выбранной"
+                          : "Выбрать версию, чтобы сравнить её с любой другой"
+                      }
+                      onClick={() => (pick && pick !== v ? compare(pick, v) : setPick(pick === v ? null : v))}
+                    >
+                      <Icon name="wave" size={14} /> {pick === v ? "Выбрана" : pick ? "С этой" : "Сравнить…"}
+                    </button>
+                  )}
                   {previous && !previous.pruned && (
                     <CompareButton
                       a={{
