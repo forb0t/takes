@@ -774,6 +774,13 @@ function SongBranches({ songs, laneOf }: { songs: Songs; laneOf: () => ReturnTyp
   const [creating, setCreating] = useState(false);
   if (!lane) return null;
   const headOf = (key: string) => lane.nodes.find((n): n is SongVersion => n.kind === "version" && n.key === key);
+  const activeHead = headOf(lane.branches.find((b) => b.active)?.head ?? "");
+  const track = (b: string, n: SongVersion) => ({
+    root: songs.root,
+    rev: n.version.id,
+    path: n.path,
+    label: `Ветка «${b}», версия ${n.number}`,
+  });
 
   return (
     <>
@@ -798,16 +805,13 @@ function SongBranches({ songs, laneOf }: { songs: Songs; laneOf: () => ReturnTyp
               </span>
               {b.active && <span className="label label-current">в папке</span>}
               <span className="grow" />
-              {usable && (
-                <PlayButton
-                  track={{
-                    root: songs.root,
-                    rev: head.version.id,
-                    path: head.path,
-                    label: `Ветка «${b.name}», версия ${head.number}`,
-                  }}
+              {usable && !b.active && activeHead && activeHead.change !== "deleted" && !activeHead.pruned && (
+                <CompareButton
+                  a={track(lane.branches.find((x) => x.active)!.name, activeHead)}
+                  b={track(b.name, head)}
                 />
               )}
+              {usable && <PlayButton track={track(b.name, head)} />}
               {usable && !b.active && (
                 <button
                   className="btn btn-small"
