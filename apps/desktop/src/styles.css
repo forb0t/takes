@@ -2111,6 +2111,12 @@ input[type="checkbox"]:disabled {
   height: 100%;
 }
 
+/* Text grows with its content (a short diff is a short dialog); PDF pages
+   load one by one, so their dialog keeps its full height from the start. */
+.modal-doc.modal-fit {
+  height: auto;
+}
+
 .text-view {
   margin: 0;
   padding: 12px 14px;

@@ -104,7 +104,7 @@ export function TextViewer({ tracks, onClose }: { tracks: Track[]; onClose: () =
   const truncated = texts?.some((t) => t.truncated);
 
   return (
-    <Modal title={splitPath(tracks[0].path).name} className="modal-doc" onClose={onClose}>
+    <Modal title={splitPath(tracks[0].path).name} className="modal-doc modal-fit" onClose={onClose}>
       {tracks.length === 2 ? (
         <div className="text-compare-head">
           <span>
@@ -129,7 +129,9 @@ export function TextViewer({ tracks, onClose }: { tracks: Track[]; onClose: () =
       {truncated && <div className="hint">Файл большой: показано только его начало.</div>}
       {texts && tracks.length === 1 && <pre className="text-view">{texts[0].text}</pre>}
       {lines === null && <div className="notice">Версии слишком разные, чтобы сравнить их построчно.</div>}
-      {lines && <DiffView lines={lines} />}
+      {lines && (added > 0 || removed > 0) && <DiffView lines={lines} />}
+      {/* Nothing to compare: the text itself is more useful than one folded line. */}
+      {lines && added === 0 && removed === 0 && texts && <pre className="text-view">{texts[1].text}</pre>}
     </Modal>
   );
 }
