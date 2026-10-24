@@ -15,11 +15,14 @@ const PERIODS: { days: number | null; label: string }[] = [
 export function CleanupDialog({
   root,
   stats,
+  keep,
   onClose,
   onDone,
 }: {
   root: string;
   stats: Stats | null;
+  /** Versions whose files stay whatever their age: the latest of every song's branch. */
+  keep: string[];
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -34,7 +37,7 @@ export function CleanupDialog({
     setPlan(null);
     setError(null);
     api
-      .cleanup(root, days, true)
+      .cleanup(root, days, true, keep)
       .then((p) => alive && setPlan(p))
       .catch((e) => alive && setError(errorText(e)));
     return () => {
@@ -46,7 +49,7 @@ export function CleanupDialog({
     setBusy(true);
     setError(null);
     try {
-      const done = await api.cleanup(root, days, false);
+      const done = await api.cleanup(root, days, false, keep);
       toast(done.bytes > 0 ? `Освобождено ${formatSize(done.bytes)}` : "Освобождать нечего", "ok");
       onDone();
       onClose();

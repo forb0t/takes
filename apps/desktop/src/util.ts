@@ -104,10 +104,10 @@ export function plural(n: number, one: string, few: string, many: string): strin
 
 export interface Label {
   text: string;
-  kind: "branch" | "current" | "tag";
+  kind: "current" | "tag";
 }
 
-/** Branch and tag names attached to each version id. */
+/** What each version id is marked with: the folder's version, tags. */
 export function labelsById(overview: Overview): Map<string, Label[]> {
   const labels = new Map<string, Label[]>();
   const add = (id: string, label: Label) => {
@@ -115,9 +115,7 @@ export function labelsById(overview: Overview): Map<string, Label[]> {
     if (list) list.push(label);
     else labels.set(id, [label]);
   };
-  for (const b of overview.branches) {
-    if (b.head) add(b.head, { text: b.name, kind: b.current ? "current" : "branch" });
-  }
+  if (overview.head) add(overview.head, { text: "в папке", kind: "current" });
   for (const t of overview.tags) add(t.target, { text: t.name, kind: "tag" });
   return labels;
 }

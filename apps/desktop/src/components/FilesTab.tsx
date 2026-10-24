@@ -12,7 +12,10 @@ import {
 import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast } from "../ui";
 import { formatDate, formatSize, naturalCompare, plural, previewKind, short, splitPath } from "../util";
+import { shortId, type SongVersion } from "../blueprint";
+import type { Songs } from "../songs";
 import { FileMetaDialog } from "./FileMetaDialog";
+import { SongBranchDialog } from "./SongBranchDialog";
 import { useFileActions } from "./useFileActions";
 
 /** Where a file stands against the latest saved version. */
@@ -70,6 +73,7 @@ const STATUS_TEXT: Record<ChangeKind, string> = {
  */
 export function FilesTab({
   overview,
+  songs,
   files,
   removed,
   statusError,
@@ -82,6 +86,7 @@ export function FilesTab({
   onAddFiles,
 }: {
   overview: Overview;
+  songs: Songs;
   /** null while the folder is being checked. */
   files: ProjectFile[] | null;
   removed: RemovedFile[];
@@ -276,6 +281,7 @@ export function FilesTab({
                       <Icon name="edit" size={12} />
                     </span>
                   )}
+                  <BranchChip songs={songs} path={f.path} />
                   <FileLabels labels={f.labels} />
                   <span className="size">{f.size !== null ? formatSize(f.size) : ""}</span>
                 </button>
@@ -314,6 +320,7 @@ export function FilesTab({
           <FileDetail
             key={selected}
             overview={overview}
+            songs={songs}
             path={selected}
             file={selectedFile}
             removed={selectedRemoved}
@@ -340,6 +347,7 @@ export function FilesTab({
  */
 export function FileDetail({
   overview,
+  songs,
   path,
   file,
   removed,
@@ -355,6 +363,7 @@ export function FileDetail({
   onRenamed,
 }: {
   overview: Overview;
+  songs: Songs;
   path: string;
   file: ProjectFile | null;
   /** Set for a file deleted and saved as deleted. */
@@ -391,6 +400,8 @@ export function FileDetail({
   const comparable = previewKind(path) !== null;
   const draftBox = useRef<HTMLTextAreaElement>(null);
   const highlighted = useRef<HTMLDivElement>(null);
+  const lane = songs.laneOf(path);
+  const branchOf = (id: string) => (lane && lane.branches.length > 1 ? lane.branchOf[shortId(id)] : undefined);
 
   useEffect(() => {
     let alive = true;
@@ -589,6 +600,8 @@ export function FileDetail({
         </div>
       )}
 
+      {lane && !elsewhere && !removed && <SongBranches songs={songs} laneOf={() => songs.laneOf(path)} />}
+
       <div className="section-title">
         Версии файла{versions ? ` · ${versions.length}` : ""}
         {rev && <span className="muted"> · по истории выбранной версии (другая ветка)</span>}
@@ -639,6 +652,12 @@ export function FileDetail({
                   {v.pruned && (
                     <span className="muted" title="Содержимое удалено при очистке места">
                       удалён при очистке
+                    </span>
+                  )}
+                  {branchOf(id) && (
+                    <span className="branch-chip" title="Ветка трека">
+                      <Icon name="branch" size={10} />
+                      {branchOf(id)}
                     </span>
                   )}
                   <FileLabels labels={v.labels} />
@@ -728,5 +747,145 @@ export function FileDetail({
         />
       )}
     </div>
+  );
+}
+
+/** The branch of a song in the folder, when the song has more than one. */
+function BranchChip({ songs, path }: { songs: Songs; path: string }) {
+  const lane = songs.laneOf(path);
+  const active = lane?.branches.find((b) => b.active);
+  if (!lane || lane.branches.length < 2 || !active) return null;
+  return (
+    <span className="branch-chip" title={`В папке ветка «${active.name}», всего веток: ${lane.branches.length}`}>
+      <Icon name="branch" size={10} />
+      {active.name}
+    </span>
+  );
+}
+
+/**
+ * A song's branches: which one is in the folder, the latest version of
+ * each, putting another one into the folder, renaming, joining, a new one.
+ */
+function SongBranches({ songs, laneOf }: { songs: Songs; laneOf: () => ReturnType<Songs["laneOf"]> }) {
+  const lane = laneOf();
+  const [menu, setMenu] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  if (!lane) return null;
+  const headOf = (key: string) => lane.nodes.find((n): n is SongVersion => n.kind === "version" && n.key === key);
+
+  return (
+    <>
+      <div className="section-title with-action">
+        Ветки трека · {lane.branches.length}
+        <span className="grow" />
+        <button className="btn btn-small btn-ghost" onClick={() => setCreating(true)}>
+          <Icon name="plus" size={13} /> Новая ветка из файла…
+        </button>
+      </div>
+      <div className="song-branches">
+        {lane.branches.map((b) => {
+          const head = headOf(b.head);
+          const usable = head && head.change !== "deleted" && !head.pruned;
+          const others = lane.branches.filter((o) => o.name !== b.name);
+          return (
+            <div key={b.name} className={`song-branch ${b.active ? "active" : ""}`}>
+              <Icon name="branch" size={14} />
+              <b className="song-branch-name">{b.name}</b>
+              <span className="muted nowrap">
+                {b.versions} {plural(b.versions, "версия", "версии", "версий")}
+              </span>
+              {b.active && <span className="label label-current">в папке</span>}
+              <span className="grow" />
+              {usable && (
+                <PlayButton
+                  track={{
+                    root: songs.root,
+                    rev: head.version.id,
+                    path: head.path,
+                    label: `Ветка «${b.name}», версия ${head.number}`,
+                  }}
+                />
+              )}
+              {usable && !b.active && (
+                <button
+                  className="btn btn-small"
+                  title="Положить последнюю версию этой ветки в папку проекта"
+                  onClick={() => songs.intoFolder(lane, head)}
+                >
+                  <Icon name="restore" size={13} /> В папку
+                </button>
+              )}
+              <div className="add-menu">
+                <button className="icon-btn" title="Ещё" onClick={() => setMenu(menu === b.name ? null : b.name)}>
+                  <Icon name="more" size={14} />
+                </button>
+                {menu === b.name && (
+                  <div className="popover" onMouseLeave={() => setMenu(null)}>
+                    <button
+                      className="popover-main"
+                      onClick={() => {
+                        setMenu(null);
+                        setRenaming(b.name);
+                      }}
+                    >
+                      <Icon name="edit" size={14} /> Переименовать…
+                    </button>
+                    {head && !b.active && usable && (
+                      <button
+                        className="popover-main"
+                        onClick={() => {
+                          setMenu(null);
+                          songs.addToBranch(lane, head);
+                        }}
+                      >
+                        <Icon name="download" size={14} /> Новая версия в ветку…
+                      </button>
+                    )}
+                    {others.map((o) => (
+                      <button
+                        key={o.name}
+                        className="popover-main"
+                        onClick={() => {
+                          setMenu(null);
+                          songs.joinBranch(lane, b.name, o.name);
+                        }}
+                      >
+                        <Icon name="merge" size={14} /> Перенести все версии в «{o.name}»
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {renaming && (
+        <PromptDialog
+          title={`Переименовать ветку «${renaming}»`}
+          label="Новое название"
+          initial={renaming}
+          confirm="Переименовать"
+          onSubmit={async (to) => {
+            if (to !== renaming && lane.branches.some((b) => b.name.toLowerCase() === to.toLowerCase())) {
+              throw new Error(`У трека уже есть ветка «${to}»`);
+            }
+            songs.renameBranch(lane, renaming, to);
+          }}
+          onClose={() => setRenaming(null)}
+        />
+      )}
+      {creating && (
+        <SongBranchDialog
+          path={lane.path}
+          taken={lane.branches.map((b) => b.name)}
+          start="версии, которая сейчас в папке"
+          onCreate={(name, source, intoFolder) => songs.createBranch(lane, "HEAD", name, source, intoFolder)}
+          onClose={() => setCreating(false)}
+        />
+      )}
+    </>
   );
 }

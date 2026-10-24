@@ -22,6 +22,7 @@ import { HistoryTab } from "./HistoryTab";
 import { ImportDialog } from "./ImportDialog";
 import { MergeDialog } from "./MergeDialog";
 import { SyncControl } from "./SyncControl";
+import { useSongs } from "../songs";
 
 type Tab = "files" | "blueprint" | "history";
 
@@ -148,6 +149,7 @@ export function ProjectView({ root }: { root: string }) {
   }, [root, head, labelsVersion, overview === null, toast]);
 
   const files = useMemo(() => (saved && changes ? projectFiles(saved, changes) : null), [saved, changes]);
+  const songs = useSongs(root, overview, files, removed, labelsVersion, refreshAll);
 
   // Descriptions survive restarts, but only while their file is unsaved.
   useEffect(() => {
@@ -367,6 +369,7 @@ export function ProjectView({ root }: { root: string }) {
       <div className="tab-body">
         {tab === "files" && (
           <FilesTab
+            songs={songs}
             overview={overview}
             files={files}
             removed={removed}
@@ -382,6 +385,7 @@ export function ProjectView({ root }: { root: string }) {
         )}
         {tab === "blueprint" && (
           <BlueprintTab
+            songs={songs}
             overview={overview}
             files={files}
             removed={removed}
@@ -423,7 +427,13 @@ export function ProjectView({ root }: { root: string }) {
         />
       )}
       {cleanup && (
-        <CleanupDialog root={root} stats={stats} onClose={() => setCleanup(false)} onDone={refreshAll} />
+        <CleanupDialog
+          root={root}
+          stats={stats}
+          keep={songs.heads()}
+          onClose={() => setCleanup(false)}
+          onDone={refreshAll}
+        />
       )}
       {editAuthor && (
         <PromptDialog

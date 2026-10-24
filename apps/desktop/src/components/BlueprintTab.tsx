@@ -1,20 +1,17 @@
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, errorText, type ChangeKind, type GraphVersion, type Overview, type RemovedFile } from "../api";
+import { api, errorText, type ChangeKind, type Overview, type RemovedFile } from "../api";
 import {
   NODE_H,
   NODE_W,
   PIN_Y,
-  SONG_BRANCHES,
   SONG_KEY,
   SONG_W,
-  buildLanes,
   frameOf,
   laneGroup,
   nodeKey,
   placeLanes,
   previousVersion,
-  shortId,
   songHue,
   wire,
   type Lane,
@@ -23,24 +20,22 @@ import {
   type PlacedLane,
   type Point,
   type Rect,
-  type SongBranches,
   type SongVersion,
   type WorkNode,
 } from "../blueprint";
 import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast, type IconName } from "../ui";
 import { baseName, formatDate, plural, previewKind, short, splitPath } from "../util";
+import { shortId } from "../blueprint";
 import { FileDetail, type Drafts, type ProjectFile } from "./FilesTab";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { SongBranchDialog } from "./SongBranchDialog";
+import { SETTLE_MS, type Songs } from "../songs";
 import { useFileActions } from "./useFileActions";
 
-/** Shared by every device of the project: the song order, where things lie, the tiles. */
-const ORDER_KEY = "songs.order";
+/** Shared by every device of the project: where things lie, the tiles. */
 const LAYOUT_KEY = "canvas.layout";
 const TILES_KEY = "canvas.tiles";
-/** Reading the project back right after an edit here may still give the old value. */
-const SETTLE_MS = 3000;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.5;
 /** A grid cell, in canvas pixels; every eighth line is a dark one. Things snap to it. */
@@ -89,6 +84,23 @@ type Drag =
   | { kind: "lane"; lane: string; by: Point }
   | { kind: "tile"; id: string; by: Point; lanes: string[]; tiles: string[] }
   | { kind: "size"; id: string; by: Point };
+
+function loadFlag(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function saveFlag(key: string, on: boolean) {
+  try {
+    localStorage.setItem(key, on ? "1" : "0");
+  } catch {
+    // A convenience only.
+  }
+}
 
 /** What lanes and tiles ask of the diagram, read when it happens so it is always current. */
 interface Actions {
@@ -206,6 +218,7 @@ function laneText(lane: Lane): string {
  */
 export function BlueprintTab({
   overview,
+  songs,
   files,
   removed,
   drafts,
@@ -217,6 +230,7 @@ export function BlueprintTab({
   onUploadVersion,
 }: {
   overview: Overview;
+  songs: Songs;
   files: ProjectFile[] | null;
   removed: RemovedFile[];
   drafts: Drafts;
@@ -231,12 +245,8 @@ export function BlueprintTab({
   const toast = useToast();
   const player = usePlayer();
   const actions = useFileActions(root, onChanged);
-  const [versions, setVersions] = useState<GraphVersion[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [order, setOrder] = useState<string[]>([]);
   const [layout, setLayout] = useState<Layout>({ lanes: {}, nodes: {} });
   const [tiles, setTiles] = useState<Tile[]>([]);
-  const [songBranches, setSongBranches] = useState(new Map<string, SongBranches>());
   /** A version going to a new branch of its song, waiting for the name. */
   const [naming, setNaming] = useState<{ lane: Lane; node: SongVersion } | null>(null);
   const [savedView] = useState(() => loadView(root));
@@ -251,6 +261,11 @@ export function BlueprintTab({
   /** The file being renamed. */
   const [renaming, setRenaming] = useState<string | null>(null);
   const [showRemoved, setShowRemoved] = useState(false);
+  /** Songs, branches and notes to find on the canvas. */
+  const [query, setQuery] = useState("");
+  const [found, setFound] = useState(0);
+  const search = useRef<HTMLInputElement>(null);
+  const [showMap, setShowMap] = useState(() => loadFlag("takes.bpmap", true));
   const [drag, setDrag] = useState<Drag | null>(null);
   const [panning, setPanning] = useState(false);
   const [box, setBox] = useState<HTMLDivElement | null>(null);
@@ -259,44 +274,14 @@ export function BlueprintTab({
   /** A drag just ended: the click that follows is not a click on what was under it. */
   const suppressClick = useRef(false);
   const localEdit = useRef(0);
-  const branchesKey = overview.branches.map((b) => `${b.name}@${b.head}`).join();
-
-  useEffect(() => {
-    let alive = true;
-    api
-      .historyGraph(root)
-      .then((v) => alive && (setVersions(v), setError(null)))
-      .catch((e) => alive && setError(errorText(e)));
-    return () => {
-      alive = false;
-    };
-  }, [root, branchesKey, refreshKey]);
+  const lanes = songs.lanes;
 
   // Another device may have moved things; a sync reloads the overview.
   useEffect(() => {
     let alive = true;
-    Promise.all([
-      Promise.all([ORDER_KEY, LAYOUT_KEY, TILES_KEY].map((key) => api.sharedSetting(root, key))),
-      api.sharedSettings(root, SONG_BRANCHES),
-    ])
-      .then(([[orderValue, layoutValue, tilesValue], songs]) => {
+    Promise.all([api.sharedSetting(root, LAYOUT_KEY), api.sharedSetting(root, TILES_KEY)])
+      .then(([layoutValue, tilesValue]) => {
         if (!alive || Date.now() - localEdit.current < SETTLE_MS) return;
-        const branches = new Map<string, SongBranches>();
-        for (const [key, value] of Object.entries(songs)) {
-          try {
-            const map: unknown = JSON.parse(value);
-            if (map && typeof map === "object") branches.set(key.slice(SONG_BRANCHES.length), map as SongBranches);
-          } catch {
-            // Unreadable: the song's versions fall back to where they came from.
-          }
-        }
-        setSongBranches(branches);
-        try {
-          const list: unknown = JSON.parse(orderValue ?? "[]");
-          if (Array.isArray(list)) setOrder(list.filter((p): p is string => typeof p === "string"));
-        } catch {
-          // Keep the order there is.
-        }
         setLayout(parseLayout(layoutValue));
         setTiles(parseTiles(tilesValue));
       })
@@ -305,13 +290,6 @@ export function BlueprintTab({
       alive = false;
     };
   }, [root, overview]);
-
-  const removedPaths = useMemo(() => new Set(removed.map((r) => r.path)), [removed]);
-  const lanes = useMemo(
-    () =>
-      versions && files ? buildLanes(versions, overview.branches, files, removedPaths, order, songBranches) : null,
-    [versions, files, overview.branches, removedPaths, order, songBranches],
-  );
   const visible = useMemo(
     () => lanes?.filter((l) => showRemoved || l.status !== "removed") ?? [],
     [lanes, showRemoved],
@@ -350,6 +328,20 @@ export function BlueprintTab({
   }, [tiles, drag]);
 
   const fileByPath = useMemo(() => new Map((files ?? []).map((f) => [f.path, f])), [files]);
+
+  // What the search finds: songs by any of their names or branches, tiles by their text.
+  const q = query.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (!q) return null;
+    const lanesFound = basePlaced
+      .filter((p) => [...p.lane.names, ...p.lane.branches.map((b) => b.name)].some((n) => n.toLowerCase().includes(q)))
+      .map((p) => ({ key: p.lane.path, rect: laneRect(p) }));
+    const tilesFound = tiles
+      .filter((t) => `${t.title} ${t.text}`.toLowerCase().includes(q))
+      .map((t) => ({ key: t.id, rect: t as Rect }));
+    return [...lanesFound, ...tilesFound].sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+  }, [q, basePlaced, tiles]);
+  const matched = useMemo(() => (matches ? new Set(matches.map((m) => m.key)) : null), [matches]);
   const tagsOf = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const t of overview.tags) map.set(t.target, [...(map.get(t.target) ?? []), t.name]);
@@ -428,6 +420,14 @@ export function BlueprintTab({
     return () => clearTimeout(t);
   }, [root, view]);
 
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    if (!box) return;
+    const observer = new ResizeObserver(() => setSize({ w: box.clientWidth, h: box.clientHeight }));
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, [box]);
+
   const zoomAt = useCallback((cx: number, cy: number, factor: number) => {
     setView((v) => {
       const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
@@ -438,6 +438,27 @@ export function BlueprintTab({
     (factor: number) => box && zoomAt(box.clientWidth / 2, box.clientHeight / 2, factor),
     [box, zoomAt],
   );
+
+  /** Brings a place on the canvas into sight: centred, or its start when it is too wide. */
+  const focusRect = useCallback(
+    (rect: Rect) => {
+      if (!box) return;
+      const { clientWidth: w, clientHeight: h } = box;
+      setView((v) => ({
+        ...v,
+        x: rect.w * v.zoom > w - 80 ? 40 - rect.x * v.zoom : w / 2 - (rect.x + rect.w / 2) * v.zoom,
+        y: rect.h * v.zoom > h - 80 ? 40 - rect.y * v.zoom : h / 2 - (rect.y + rect.h / 2) * v.zoom,
+      }));
+    },
+    [box],
+  );
+
+  function findNext(step: 1 | -1) {
+    if (!matches?.length) return;
+    const next = (found + step + matches.length) % matches.length;
+    setFound(next);
+    focusRect(matches[next].rect);
+  }
 
   /** A point on the screen, on the canvas. */
   const toCanvas = useCallback(
@@ -552,9 +573,7 @@ export function BlueprintTab({
     if (!ok) return;
     const sorted = [...basePlaced].sort((a, b) => a.origin.y - b.origin.y || a.origin.x - b.origin.x);
     const paths = sorted.map((p) => p.lane.path);
-    const rest = order.filter((p) => !paths.includes(p));
-    setOrder([...paths, ...rest]);
-    saveSetting(ORDER_KEY, [...paths, ...rest]);
+    songs.setOrder([...paths, ...songs.order.filter((p) => !paths.includes(p))]);
     saveLayout({ lanes: {}, nodes: {} });
     fitted.current = false;
     requestAnimationFrame(() => fit());
@@ -721,9 +740,15 @@ export function BlueprintTab({
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // F shows everything, + and − zoom, 0 returns to 100%.
+  // F shows everything, + and − zoom, 0 returns to 100%, Ctrl+F finds.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyF" && !document.querySelector(".modal-backdrop")) {
+        e.preventDefault();
+        search.current?.focus();
+        search.current?.select();
+        return;
+      }
       if (e.ctrlKey || e.metaKey || e.altKey || !box) return;
       if ((e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
       if (document.querySelector(".modal-backdrop")) return;
@@ -748,17 +773,10 @@ export function BlueprintTab({
   });
   const nowTrack = (path: string): Track => ({ root, rev: null, path, label: "Сейчас на диске (не сохранено)" });
 
-  /** Keeps a song's branches; the versions it does not name follow those they were made from. */
-  function saveSongBranches(lane: Lane, change: SongBranches) {
-    const next = { ...lane.branchOf, ...change };
-    setSongBranches((all) => new Map(all).set(lane.id, next));
-    saveSetting(SONG_BRANCHES + lane.id, next);
-  }
-
   /** A version goes to another branch of its song: only where it is drawn changes. */
   function moveToBranch(lane: Lane, n: SongVersion, to: string) {
     if (n.branch === to) return;
-    saveSongBranches(lane, { [shortId(n.version.id)]: to });
+    songs.sortInto(lane, { [shortId(n.version.id)]: to });
     // It takes its place in the other row, wherever it was put by hand.
     const own = lane.names.map((name) => layout.nodes[name]).find((m) => m !== undefined);
     if (own?.[n.key]) {
@@ -767,51 +785,6 @@ export function BlueprintTab({
       saveLayout({ ...layout, nodes: { ...layout.nodes, [lane.path]: rest } });
     }
     toast(`Версия ${n.number ?? ""} «${splitPath(lane.path).name}» теперь в ветке «${to}»`, "ok");
-  }
-
-  /** Puts a version into the folder, saved there; its branch becomes the song's branch in the folder. */
-  async function useVersion(lane: Lane, n: SongVersion) {
-    const name = splitPath(lane.path).name;
-    if (lane.status !== "saved" && lane.status !== "deleted") {
-      toast(`Сначала сохраните или отмените изменения «${name}»: они не должны потеряться.`, "error");
-      return;
-    }
-    try {
-      const id = await api.useTake(root, n.version.id, n.path, lane.path, n.branch);
-      if (id) saveSongBranches(lane, { [shortId(id)]: n.branch });
-      toast(`В папке «${name}» из ветки «${n.branch}»`, "ok");
-      onChanged();
-    } catch (e) {
-      toast(errorText(e), "error");
-    }
-  }
-
-  /** A file from disk as the next version of a branch that is not in the folder. */
-  async function addToBranch(lane: Lane, n: SongVersion) {
-    const source = await open({ multiple: false, title: `Новая версия «${splitPath(lane.path).name}», ветка «${n.branch}»` });
-    if (typeof source !== "string") return;
-    try {
-      const id = await api.saveTake(root, source, lane.path, n.version.id, n.branch);
-      saveSongBranches(lane, { [shortId(id)]: n.branch });
-      toast(`Версия сохранена в ветке «${n.branch}»`, "ok");
-      onChanged();
-    } catch (e) {
-      toast(errorText(e), "error");
-    }
-  }
-
-  /** A new branch of a song whose first version is a file from disk. */
-  async function createBranch(start: BranchStart, name: string, source: string, intoFolder: boolean) {
-    const { lane, parent } = start;
-    const id = await api.saveTake(root, source, lane.path, parent, name);
-    const change: SongBranches = { [shortId(id)]: name };
-    if (intoFolder) {
-      const used = await api.useTake(root, id, lane.path, lane.path, name);
-      if (used) change[shortId(used)] = name;
-    }
-    saveSongBranches(lane, change);
-    toast(`У «${splitPath(lane.path).name}» новая ветка «${name}»`, "ok");
-    onChanged();
   }
 
   async function quickSave(w: WorkNode) {
@@ -874,7 +847,7 @@ export function BlueprintTab({
               {
                 label: `Положить в папку (ветка «${n.branch}»)`,
                 icon: "restore" as const,
-                run: () => useVersion(lane, n),
+                run: () => songs.intoFolder(lane, n),
               },
             ]),
         {
@@ -891,7 +864,11 @@ export function BlueprintTab({
     }
     const branch = lane.branches.find((b) => b.name === n.branch);
     if (usable && branch && branch.head === n.key && !branch.active) {
-      items.push({ label: `Новая версия в ветку «${n.branch}»…`, icon: "download", run: () => addToBranch(lane, n) });
+      items.push({
+        label: `Новая версия в ветку «${n.branch}»…`,
+        icon: "download",
+        run: () => songs.addToBranch(lane, n),
+      });
     }
     if (n.change !== "deleted") {
       for (const b of lane.branches.filter((b) => b.name !== n.branch)) {
@@ -1022,10 +999,10 @@ export function BlueprintTab({
 
   // ---- drawing ------------------------------------------------------------------
 
-  if (error) return <div className="center error-text">{error}</div>;
+  if (songs.error) return <div className="center error-text">{songs.error}</div>;
   if (!lanes) return <div className="center muted">Строю схему…</div>;
 
-  const songs = lanes.filter((l) => laneGroup(l) === 0).length;
+  const songCount = lanes.filter((l) => laneGroup(l) === 0).length;
   const unsaved = lanes.filter((l) => l.nodes.some((n) => n.kind === "work")).length;
   const removedCount = lanes.length - lanes.filter((l) => l.status !== "removed").length;
   const empty = lanes.length === 0 && tiles.length === 0;
@@ -1059,7 +1036,7 @@ export function BlueprintTab({
       <div className="bp-main">
         <div className="bp-toolbar">
           <span className="muted">
-            {songs} {plural(songs, "песня", "песни", "песен")}
+            {songCount} {plural(songCount, "песня", "песни", "песен")}
             {unsaved > 0 && ` · не сохранено: ${unsaved}`}
           </span>
           {removedCount > 0 && (
@@ -1071,6 +1048,30 @@ export function BlueprintTab({
               удалённые · {removedCount}
             </button>
           )}
+          <div className={`bp-search ${q && matches?.length === 0 ? "none" : ""}`}>
+            <input
+              ref={search}
+              value={query}
+              placeholder="Найти песню, ветку, заметку"
+              title="Ctrl+F · Enter — следующая, Shift+Enter — предыдущая, Esc — сбросить"
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setFound(-1);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") findNext(e.shiftKey ? -1 : 1);
+                else if (e.key === "Escape") {
+                  setQuery("");
+                  e.currentTarget.blur();
+                }
+              }}
+            />
+            {q && (
+              <span className="muted nowrap">
+                {matches?.length ? `${Math.max(found, 0) + 1}/${matches.length}` : "нет"}
+              </span>
+            )}
+          </div>
           <span className="grow" />
           <span className="bp-legend muted">
             <i className="bp-sw sw-song" /> песня
@@ -1101,9 +1102,20 @@ export function BlueprintTab({
           <button className="btn btn-small" onClick={fit} title="Показать всю схему (F)">
             Показать всё
           </button>
+          <button
+            className={`chip ${showMap ? "chip-on" : ""}`}
+            onClick={() => {
+              saveFlag("takes.bpmap", !showMap);
+              setShowMap(!showMap);
+            }}
+            title="Мини-карта полотна"
+          >
+            карта
+          </button>
           <span
             className="bp-help"
             title={
+              "Красный заголовок — песня, синий — версия, серый — версия не из папки, оранжевый — файл не сохранён\n" +
               "Тащите полотно мышью (или средней кнопкой)\n" +
               "Колесо — прокрутка, Shift + колесо — вбок\n" +
               "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё\n" +
@@ -1157,7 +1169,14 @@ export function BlueprintTab({
             {shownTiles
               .filter((t) => t.kind === "frame")
               .map((t) => (
-                <TileView key={t.id} tile={t} selected={selectedTile === t.id} editing={editing === t.id} act={act} />
+                <TileView
+                  key={t.id}
+                  tile={t}
+                  selected={selectedTile === t.id}
+                  editing={editing === t.id}
+                  dim={!!matched && !matched.has(t.id)}
+                  act={act}
+                />
               ))}
             {placed.map((p) => (
               <LaneView
@@ -1168,6 +1187,7 @@ export function BlueprintTab({
                 draft={drafts.get(p.lane.path)}
                 tagsOf={tagsOf}
                 selectedKey={selected?.path === p.lane.path ? (selected.key ?? "") : null}
+                dim={!!matched && !matched.has(p.lane.path)}
                 dragging={
                   drag?.kind === "node" && drag.lane === p.lane.path
                     ? drag.key
@@ -1181,7 +1201,14 @@ export function BlueprintTab({
             {shownTiles
               .filter((t) => t.kind !== "frame")
               .map((t) => (
-                <TileView key={t.id} tile={t} selected={selectedTile === t.id} editing={editing === t.id} act={act} />
+                <TileView
+                  key={t.id}
+                  tile={t}
+                  selected={selectedTile === t.id}
+                  editing={editing === t.id}
+                  dim={!!matched && !matched.has(t.id)}
+                  act={act}
+                />
               ))}
           </div>
 
@@ -1223,7 +1250,18 @@ export function BlueprintTab({
             </div>
           )}
 
-          <div className="bp-watermark">СХЕМА</div>
+          <div className={`bp-watermark ${showMap ? "beside-map" : ""}`}>СХЕМА</div>
+          {showMap && !empty && (
+            <Minimap
+              rects={[
+                ...shownTiles.map((t) => ({ ...(t as Rect), hue: t.color, frame: t.kind === "frame" })),
+                ...placed.map((p) => ({ ...laneRect(p), hue: songHue(p.lane.path), frame: true })),
+              ]}
+              view={view}
+              size={size}
+              onCenter={(x, y) => setView((v) => ({ ...v, x: size.w / 2 - x * v.zoom, y: size.h / 2 - y * v.zoom }))}
+            />
+          )}
         </div>
       </div>
 
@@ -1259,6 +1297,7 @@ export function BlueprintTab({
           <FileDetail
             key={panelLane.path}
             overview={overview}
+            songs={songs}
             path={panelLane.path}
             file={fileByPath.get(panelLane.path) ?? null}
             removed={panelLane.status === "removed" ? (removed.find((r) => r.path === panelLane.path) ?? null) : null}
@@ -1301,7 +1340,9 @@ export function BlueprintTab({
           path={branching.lane.path}
           taken={branching.lane.branches.map((b) => b.name)}
           start={branching.start}
-          onCreate={(name, source, intoFolder) => createBranch(branching, name, source, intoFolder)}
+          onCreate={(name, source, intoFolder) =>
+            songs.createBranch(branching.lane, branching.parent, name, source, intoFolder)
+          }
           onClose={() => setBranching(null)}
         />
       )}
@@ -1376,6 +1417,7 @@ const LaneView = memo(function LaneView({
   tagsOf,
   selectedKey,
   dragging,
+  dim,
   act,
 }: {
   root: string;
@@ -1388,6 +1430,8 @@ const LaneView = memo(function LaneView({
   selectedKey: string | null;
   /** The node being dragged; "" for the whole lane. */
   dragging: string | null;
+  /** Not what the search is looking for. */
+  dim: boolean;
   act: React.RefObject<Actions>;
 }) {
   const { lane, origin, at, frame } = placed;
@@ -1438,6 +1482,7 @@ const LaneView = memo(function LaneView({
         `lane-${lane.status}`,
         selectedKey !== null ? "selected" : "",
         dragging === "" ? "lifted" : "",
+        dim ? "dim" : "",
       ].join(" ")}
       style={{
         left: origin.x + frame.x,
@@ -1657,11 +1702,13 @@ function TileView({
   tile,
   selected,
   editing,
+  dim,
   act,
 }: {
   tile: Tile;
   selected: boolean;
   editing: boolean;
+  dim: boolean;
   act: React.RefObject<Actions>;
 }) {
   const el = useRef<HTMLDivElement>(null);
@@ -1739,7 +1786,7 @@ function TileView({
 
   if (tile.kind === "frame") {
     return (
-      <div {...common} className={`bp-group ${selected ? "selected" : ""}`}>
+      <div {...common} className={`bp-group ${selected ? "selected" : ""} ${dim ? "dim" : ""}`}>
         <div className="bp-group-title" onPointerDown={(e) => act.current.dragTile(e, tile)}>
           {titleField}
         </div>
@@ -1766,7 +1813,7 @@ function TileView({
       <div
         {...common}
         data-file-drop
-        className={`bp-node bp-placeholder ${selected ? "selected" : ""}`}
+        className={`bp-node bp-placeholder ${selected ? "selected" : ""} ${dim ? "dim" : ""}`}
         onPointerDown={(e) => act.current.dragTile(e, tile)}
       >
         <div className="bp-node-head">
@@ -1790,7 +1837,7 @@ function TileView({
   return (
     <div
       {...common}
-      className={`bp-node bp-note ${selected ? "selected" : ""}`}
+      className={`bp-node bp-note ${selected ? "selected" : ""} ${dim ? "dim" : ""}`}
       onPointerDown={(e) => act.current.dragTile(e, tile)}
     >
       <div className="bp-node-head">
@@ -1800,5 +1847,74 @@ function TileView({
       {body}
       {resize}
     </div>
+  );
+}
+
+/**
+ * The whole canvas in small, with the part in sight: a click or a drag
+ * brings another part into sight.
+ */
+function Minimap({
+  rects,
+  view,
+  size,
+  onCenter,
+}: {
+  rects: (Rect & { hue: number; frame: boolean })[];
+  view: View;
+  size: { w: number; h: number };
+  onCenter: (x: number, y: number) => void;
+}) {
+  const W = 200;
+  const H = 130;
+  const pad = 60;
+  const x0 = Math.min(...rects.map((r) => r.x)) - pad;
+  const y0 = Math.min(...rects.map((r) => r.y)) - pad;
+  const x1 = Math.max(...rects.map((r) => r.x + r.w)) + pad;
+  const y1 = Math.max(...rects.map((r) => r.y + r.h)) + pad;
+  const scale = Math.min(W / (x1 - x0), H / (y1 - y0));
+  const to = (x: number, y: number) => ({ x: (x - x0) * scale, y: (y - y0) * scale });
+  const seen = to(-view.x / view.zoom, -view.y / view.zoom);
+
+  function center(e: React.PointerEvent<SVGSVGElement>) {
+    const r = e.currentTarget.getBoundingClientRect();
+    onCenter(x0 + (e.clientX - r.left) / scale, y0 + (e.clientY - r.top) / scale);
+  }
+
+  return (
+    <svg
+      className="bp-map"
+      width={(x1 - x0) * scale}
+      height={(y1 - y0) * scale}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        center(e);
+      }}
+      onPointerMove={(e) => e.currentTarget.hasPointerCapture(e.pointerId) && center(e)}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      {rects.map((r, i) => {
+        const p = to(r.x, r.y);
+        return (
+          <rect
+            key={i}
+            x={p.x}
+            y={p.y}
+            width={Math.max(2, r.w * scale)}
+            height={Math.max(2, r.h * scale)}
+            rx={2}
+            fill={`hsl(${r.hue} 50% 55% / ${r.frame ? 0.35 : 0.8})`}
+          />
+        );
+      })}
+      <rect
+        className="bp-map-view"
+        x={seen.x}
+        y={seen.y}
+        width={(size.w / view.zoom) * scale}
+        height={(size.h / view.zoom) * scale}
+      />
+    </svg>
   );
 }

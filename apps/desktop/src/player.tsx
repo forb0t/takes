@@ -14,7 +14,7 @@ import { PdfViewer } from "./PdfViewer";
 import { TextViewer } from "./TextViewer";
 import { Icon } from "./ui";
 import { formatDate, formatTime, previewKind, splitPath, type PreviewKind } from "./util";
-import { Waveform } from "./Waveform";
+import { Waveform, type Loop } from "./Waveform";
 
 /** A file version to play. `rev: null` is the file as it is on disk now. */
 export interface Track {
@@ -204,6 +204,8 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
   const [matchLoudness, setMatchLoudness] = useState(true);
   const [panelOpen, setPanelOpen] = useState(false);
   const [highlight, setHighlight] = useState<number | null>(null);
+  /** A part played over and over, in both versions of an A/B comparison. */
+  const [loop, setLoop] = useState<Loop | null>(null);
 
   const deck = decks[active];
   const track = tracks[active];
@@ -223,18 +225,32 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
     });
   });
 
-  // Smooth progress while playing.
+  // Smooth progress while playing; at the end of a loop, back to its start.
   useEffect(() => {
     if (!playing) return;
     let frame = 0;
     const tick = () => {
       const a = audios[active].current;
-      if (a) setPositionMs(a.currentTime * 1000);
+      if (a) {
+        if (loop && (a.currentTime * 1000 >= loop[1] || a.ended)) {
+          seek(loop[0]);
+          if (a.paused) a.play().catch(() => setPlaying(false));
+        } else {
+          setPositionMs(a.currentTime * 1000);
+        }
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [playing, active]);
+  }, [playing, active, loop]);
+
+  function startLoop(next: Loop) {
+    setLoop(next);
+    seek(next[0]);
+    const a = audios[active].current;
+    if (a?.paused) a.play().catch(() => setPlaying(false));
+  }
 
   // Start playing as soon as the first version is ready.
   const autoplayed = useRef(false);
@@ -251,6 +267,8 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
     else a.pause();
   }
 
+  const seekRef = useRef(seek);
+  seekRef.current = seek;
   function seek(ms: number) {
     for (const a of audios) {
       if (a.current && a.current.readyState > 0) a.current.currentTime = ms / 1000;
@@ -270,18 +288,26 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
     if (wasPlaying) to.play().catch(() => setPlaying(false));
   }
 
-  // Keyboard: Space plays/pauses, X switches A/B.
-  const keys = useRef({ toggle, switchTo, active });
-  keys.current = { toggle, switchTo, active };
+  // Keyboard: Space plays/pauses, X switches A/B, ← → step 5 seconds, L ends a loop.
+  const keys = useRef({ toggle, switchTo, active, positionMs, durationMs });
+  keys.current = { toggle, switchTo, active, positionMs, durationMs };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.closest("input, textarea, select, button, [contenteditable]")) return;
+      if (document.querySelector(".modal-backdrop") || e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = keys.current;
       if (e.code === "Space") {
         e.preventDefault();
-        keys.current.toggle();
+        k.toggle();
       } else if (e.code === "KeyX") {
-        keys.current.switchTo(1 - keys.current.active);
+        k.switchTo(1 - k.active);
+      } else if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+        e.preventDefault();
+        const step = e.code === "ArrowLeft" ? -5000 : 5000;
+        seekRef.current(Math.min(Math.max(k.positionMs + step, 0), k.durationMs || Infinity));
+      } else if (e.code === "KeyL") {
+        setLoop(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -329,6 +355,11 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
         <div className="player-info">
           <div className="player-title">{splitPath(track.path).name}</div>
           <div className="player-sub">{ab ? "Сравнение версий · X — переключить" : track.label}</div>
+          {loop && (
+            <button className="chip chip-on loop-chip" onClick={() => setLoop(null)} title="Перестать повторять (L)">
+              ⟲ {formatTime(loop[0])}–{formatTime(loop[1])} <Icon name="close" size={11} />
+            </button>
+          )}
         </div>
 
         {ab && (
@@ -411,7 +442,9 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
             durationMs={durationMs}
             positionMs={positionMs}
             comments={deck.comments}
+            loop={loop}
             onSeek={seek}
+            onLoop={startLoop}
             onMarker={(c) => {
               seek(c.timecodeMs ?? 0);
               setHighlight(c.id);

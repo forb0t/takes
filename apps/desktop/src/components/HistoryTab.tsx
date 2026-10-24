@@ -1,4 +1,4 @@
-import { save } from "@tauri-apps/plugin-dialog";
+import { ask, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText, type Change, type Overview, type Snapshot } from "../api";
 import { CompareButton, PlayButton } from "../player";
@@ -106,14 +106,20 @@ export function HistoryTab({ overview, onChanged }: { overview: Overview; onChan
   );
 }
 
-export function Labels({ labels }: { labels: Label[] | undefined }) {
+/** The folder's version and tags; a tag can be taken off with `onRemove`. */
+export function Labels({ labels, onRemove }: { labels: Label[] | undefined; onRemove?: (tag: string) => void }) {
   if (!labels?.length) return null;
   return (
     <div className="labels">
       {labels.map((l) => (
         <span key={`${l.kind}:${l.text}`} className={`label label-${l.kind}`}>
-          <Icon name={l.kind === "tag" ? "tag" : "branch"} size={11} />
+          <Icon name={l.kind === "tag" ? "tag" : "check"} size={11} />
           {l.text}
+          {onRemove && l.kind === "tag" && (
+            <button className="label-remove" title={`Снять метку «${l.text}»`} onClick={() => onRemove(l.text)}>
+              <Icon name="close" size={10} />
+            </button>
+          )}
         </span>
       ))}
     </div>
@@ -153,6 +159,22 @@ export function VersionDetail({
   const id = snapshot.id;
   const label = `версии ${short(id)}`;
 
+  async function removeTag(name: string) {
+    const ok = await ask(`Снять метку «${name}»? Сама версия останется в истории.`, {
+      title: "Снять метку",
+      okLabel: "Снять",
+      cancelLabel: "Отмена",
+    });
+    if (!ok) return;
+    try {
+      await api.deleteTag(root, name);
+      toast(`Метка «${name}» снята`, "ok");
+      onChanged();
+    } catch (e) {
+      toast(errorText(e), "error");
+    }
+  }
+
   async function exportZip() {
     const name = labels?.find((l) => l.kind === "tag")?.text ?? short(id);
     const dest = await save({
@@ -186,7 +208,7 @@ export function VersionDetail({
             </span>
           )}
         </div>
-        <Labels labels={labels} />
+        <Labels labels={labels} onRemove={removeTag} />
         <div className="detail-actions">
           <button className="btn" onClick={() => setTagging(true)}>
             <Icon name="tag" /> Отметить версию

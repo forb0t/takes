@@ -21,7 +21,7 @@ export function MergeDialog({
   onMerged,
 }: {
   overview: Overview;
-  /** Branches that also changed on other devices, merged as `branch@device`. */
+  /** What changed both here and on other devices, merged as `branch@device`. */
   remoteSources?: DivergedBranch[];
   initialSource?: string;
   onClose: () => void;
@@ -29,10 +29,11 @@ export function MergeDialog({
 }) {
   const root = overview.root;
   const toast = useToast();
-  const sources = [
-    ...remoteSources.map((d) => ({ value: d.rev, label: `${d.branch} с устройства «${d.device}»` })),
-    ...overview.branches.filter((b) => !b.current && b.head).map((b) => ({ value: b.name, label: b.name })),
-  ];
+  const sources = remoteSources.map((d) => ({
+    value: d.rev,
+    label: d.branch === overview.branch ? `«${d.device}»` : `«${d.device}» · ${d.branch}`,
+  }));
+  const device = (rev: string) => remoteSources.find((d) => d.rev === rev)?.device ?? rev;
   const [source, setSource] = useState(initialSource ?? sources[0]?.value ?? "");
   const [preview, setPreview] = useState<MergePreview | null>(null);
   const [choices, setChoices] = useState<Record<string, Resolution>>({});
@@ -71,10 +72,10 @@ export function MergeDialog({
       }
       toast(
         outcome.kind === "fastForward"
-          ? `«${overview.branch}» обновлена до «${source}»`
+          ? `Получены версии с «${device(source)}»`
           : outcome.kind === "merged"
-            ? `«${source}» слита в «${overview.branch}» (${short(outcome.id ?? "")})`
-            : "Нечего сливать",
+            ? `Версии с «${device(source)}» объединены (${short(outcome.id ?? "")})`
+            : "Объединять нечего",
         "ok",
       );
       onMerged();
@@ -92,7 +93,7 @@ export function MergeDialog({
 
   return (
     <Modal
-      title={`Слить ветку в «${overview.branch}»`}
+      title="Объединить версии с другим устройством"
       wide
       onClose={onClose}
       footer={
@@ -106,13 +107,13 @@ export function MergeDialog({
             Отмена
           </button>
           <button className="btn btn-primary" disabled={!canMerge} onClick={merge}>
-            <Icon name="merge" /> {busy ? "Сливаю…" : "Слить"}
+            <Icon name="merge" /> {busy ? "Объединяю…" : "Объединить"}
           </button>
         </>
       }
     >
       <label className="field">
-        <span>Какую ветку слить</span>
+        <span>С каким устройством</span>
         <select value={source} onChange={(e) => setSource(e.target.value)}>
           {sources.map((s) => (
             <option key={s.value} value={s.value}>
@@ -123,15 +124,14 @@ export function MergeDialog({
       </label>
 
       {error && <div className="error-text">{error}</div>}
-      {!preview && !error && <div className="muted">Сравниваю ветки…</div>}
+      {!preview && !error && <div className="muted">Сравниваю версии…</div>}
 
       {preview?.kind === "upToDate" && (
-        <div className="notice">Все версии из «{source}» уже есть в «{overview.branch}». Сливать нечего.</div>
+        <div className="notice">Все версии с «{device(source)}» уже здесь. Объединять нечего.</div>
       )}
       {preview?.kind === "fastForward" && (
         <div className="notice">
-          В «{overview.branch}» нет ничего нового относительно «{source}», поэтому она просто получит версии из
-          «{source}».
+          Здесь нет ничего нового относительно «{device(source)}», поэтому папка просто получит его версии.
         </div>
       )}
 
@@ -152,7 +152,7 @@ export function MergeDialog({
       {conflicts.length > 0 && (
         <>
           <div className="section-title">
-            Изменены в обеих ветках · {conflicts.length}
+            Изменены и здесь, и там · {conflicts.length}
             <span className="muted"> · выберите, что оставить</span>
           </div>
           <div className="conflicts">
@@ -161,10 +161,10 @@ export function MergeDialog({
                 key={c.path}
                 conflict={c}
                 root={root}
-                ours={overview.branch}
+                ours="здесь"
                 oursRev={overview.head ?? "HEAD"}
                 theirs={source}
-                theirsName={remoteSources.find((d) => d.rev === source)?.device ?? source}
+                theirsName={device(source)}
                 choice={choices[c.path]}
                 onChoose={(r) => setChoices((all) => ({ ...all, [c.path]: r }))}
               />
@@ -192,7 +192,7 @@ function ConflictRow({
   oursRev: string;
   /** Rev to load their version from. */
   theirs: string;
-  /** How to call their side: a branch, or the other device's name. */
+  /** The other device's name. */
   theirsName: string;
   choice: Resolution | undefined;
   onChoose: (r: Resolution) => void;
@@ -200,8 +200,8 @@ function ConflictRow({
   const path = conflict.path;
   const describe = (side: Conflict["ours"]) => (side ? formatSize(side.size) : "удалён");
   const options: { value: Resolution; title: string; sub: string; disabled?: boolean }[] = [
-    { value: "ours", title: `Из «${ours}»`, sub: describe(conflict.ours) },
-    { value: "theirs", title: `Из «${theirsName}»`, sub: describe(conflict.theirs) },
+    { value: "ours", title: "Отсюда", sub: describe(conflict.ours) },
+    { value: "theirs", title: `С «${theirsName}»`, sub: describe(conflict.theirs) },
     {
       value: "both",
       title: "Оставить обе",
@@ -216,15 +216,15 @@ function ConflictRow({
         <div className="row-actions">
           {conflict.ours && conflict.theirs && (
             <CompareButton
-              a={{ root, rev: oursRev, path, label: `Из «${ours}»` }}
-              b={{ root, rev: theirs, path, label: `Из «${theirsName}»` }}
+              a={{ root, rev: oursRev, path, label: "Здесь" }}
+              b={{ root, rev: theirs, path, label: `С «${theirsName}»` }}
             />
           )}
           {conflict.ours && (
-            <PlayButton track={{ root, rev: oursRev, path, label: `Из «${ours}»` }} text={ours} />
+            <PlayButton track={{ root, rev: oursRev, path, label: "Здесь" }} text={ours} />
           )}
           {conflict.theirs && (
-            <PlayButton track={{ root, rev: theirs, path, label: `Из «${theirsName}»` }} text={theirsName} />
+            <PlayButton track={{ root, rev: theirs, path, label: `С «${theirsName}»` }} text={theirsName} />
           )}
         </div>
       </div>

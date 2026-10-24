@@ -271,21 +271,18 @@ export const api = {
   setSharedSetting: (root: string, key: string, value: string) =>
     invoke<void>("set_shared_setting", { root, key, value }),
   stats: (root: string) => invoke<Stats>("stats", { root }),
-  cleanup: (root: string, olderThanDays: number | null, dryRun: boolean) =>
-    invoke<Cleanup>("cleanup", { root, olderThanDays, dryRun }),
+  cleanup: (root: string, olderThanDays: number | null, dryRun: boolean, keep: string[]) =>
+    invoke<Cleanup>("cleanup", { root, olderThanDays, dryRun, keep }),
   exportZip: (root: string, rev: string, dest: string) => invoke<number>("export_zip", { root, rev, dest }),
   setAuthor: (root: string, name: string) => invoke<void>("set_author", { root, name }),
 
   switchBranch: (root: string, name: string) => invoke<void>("switch_branch", { root, name }),
-  createBranch: (root: string, name: string, from: string | null, switchTo: boolean) =>
-    invoke<void>("create_branch", { root, name, from, switchTo }),
   /** Saves a file from outside as a version of `path` after version `parent`, beside the folder. */
   saveTake: (root: string, source: string, path: string, parent: string, variant: string) =>
     invoke<string>("save_take", { root, source, path, parent, variant }),
   /** Brings a version into the folder as `path`, saved there; null if it is there already. */
   useTake: (root: string, rev: string, from: string, path: string, variant: string) =>
     invoke<string | null>("use_take", { root, rev, from, path, variant }),
-  deleteBranch: (root: string, name: string) => invoke<void>("delete_branch", { root, name }),
   createTag: (root: string, name: string, rev: string) => invoke<void>("create_tag", { root, name, rev }),
   deleteTag: (root: string, name: string) => invoke<void>("delete_tag", { root, name }),
   mergePreview: (root: string, rev: string) => invoke<MergePreview>("merge_preview", { root, rev }),

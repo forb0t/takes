@@ -534,19 +534,6 @@ h2 {
   font-size: 13px;
 }
 
-/* ---- branch menu ------------------------------------------------------------- */
-
-.branch-menu {
-  position: relative;
-}
-
-.branch-btn .branch-name {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 600;
-}
-
 .popover {
   position: absolute;
   top: calc(100% + 6px);
@@ -560,58 +547,21 @@ h2 {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
-.popover-title {
-  padding: 6px 8px;
-  color: var(--faint);
-  font-size: 11.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.popover-item {
-  display: flex;
-  align-items: center;
-  border-radius: 6px;
-}
-
-.popover-item:hover {
-  background: var(--hover);
-}
-
 .popover-main {
   flex: 1;
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   padding: 7px 8px;
+  border-radius: 6px;
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.popover-item.current .popover-main {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.popover-check {
-  display: inline-grid;
-  width: 16px;
-}
-
-.popover-item .icon-btn {
-  opacity: 0;
-}
-
-.popover-item:hover .icon-btn {
-  opacity: 1;
-}
-
-.popover-sep {
-  height: 1px;
-  margin: 6px 2px;
-  background: var(--border);
+.popover-main:hover {
+  background: var(--hover);
 }
 
 .popover-action {
@@ -750,10 +700,6 @@ input[type="checkbox"]:disabled {
 
 .row:hover {
   background: var(--panel);
-}
-
-.row-off .path {
-  opacity: 0.45;
 }
 
 .row-actions {
@@ -1624,6 +1570,8 @@ input[type="checkbox"]:disabled {
   position: relative;
   height: 56px;
   cursor: pointer;
+  touch-action: none;
+  user-select: none;
 }
 
 .waveform canvas {
@@ -1642,6 +1590,25 @@ input[type="checkbox"]:disabled {
 
 .waveform.loading canvas {
   opacity: 0.5;
+}
+
+.wave-loop {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-right: 1px solid var(--accent);
+  border-left: 1px solid var(--accent);
+  background: var(--accent-soft);
+  pointer-events: none;
+}
+
+.wave-loop.selecting {
+  border-style: dashed;
+}
+
+.loop-chip {
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
 }
 
 .wave-hover {
@@ -2372,6 +2339,82 @@ input[type="checkbox"]:disabled {
   user-select: none !important;
 }
 
+/* ---- a song's branches -------------------------------------------------------- */
+
+.branch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  max-width: 140px;
+  padding: 0 7px;
+  overflow: hidden;
+  border-radius: 8px;
+  color: #c8b4ff;
+  background: rgba(160, 130, 255, 0.13);
+  font-size: 11px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.song-branches {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 18px;
+}
+
+.song-branch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.song-branch.active {
+  border-color: rgba(95, 209, 139, 0.35);
+}
+
+.song-branch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.song-branch .add-menu {
+  position: relative;
+}
+
+.section-title.with-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title.with-action .btn {
+  margin: -4px 0;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.label-remove {
+  display: inline-flex;
+  margin-left: 2px;
+  padding: 1px;
+  border-radius: 4px;
+  opacity: 0.6;
+}
+
+.label-remove:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.3);
+}
+
 /* ---- diagram: a blueprint of songs ------------------------------------------------- */
 
 .bp-wrap {
@@ -3012,6 +3055,52 @@ input[type="checkbox"]:disabled {
   background: rgba(143, 199, 255, 0.12);
 }
 
+.bp-lane.dim,
+.bp-node.dim,
+.bp-group.dim {
+  opacity: 0.22;
+}
+
+.bp-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.bp-search input {
+  width: 210px;
+  padding: 4px 9px;
+  font-size: 12.5px;
+}
+
+.bp-search.none input {
+  border-color: var(--danger);
+}
+
+.bp-map {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 7;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(17, 17, 20, 0.88);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  cursor: crosshair;
+}
+
+.bp-map-view {
+  fill: rgba(255, 255, 255, 0.06);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.bp-watermark.beside-map {
+  right: 236px;
+}
+
 .bp-watermark {
   position: absolute;
   right: 24px;
@@ -3048,6 +3137,13 @@ input[type="checkbox"]:disabled {
   z-index: 1;
 }
 
+/* The legend goes first when the toolbar runs out of room. */
+@media (max-width: 1600px) {
+  .bp-legend {
+    display: none;
+  }
+}
+
 /* A narrow window has no room beside the canvas: the panel covers it. */
 @media (max-width: 1180px) {
   .bp-panel {
@@ -3060,7 +3156,12 @@ input[type="checkbox"]:disabled {
     box-shadow: -18px 0 40px rgba(0, 0, 0, 0.45);
   }
 
-  .bp-legend {
+  .bp-legend,
+  .bp-map {
     display: none;
+  }
+
+  .bp-search input {
+    width: 150px;
   }
 }

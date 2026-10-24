@@ -65,10 +65,15 @@ function drawGhost(ctx: CanvasRenderingContext2D, cols: [number, number][], heig
   }
 }
 
+/** A part of the track played over and over, [from, to] in ms. */
+export type Loop = [number, number];
+/** Shorter selections are clicks. */
+const MIN_LOOP_MS = 300;
+
 /**
- * Waveform overview with playback progress, click-to-seek and comment marks.
- * The bars are drawn once; progress only moves a clip over a second,
- * highlighted copy, so playback does not redraw anything.
+ * Waveform overview with playback progress, click-to-seek, drag-to-loop and
+ * comment marks. The bars are drawn once; progress only moves a clip over a
+ * second, highlighted copy, so playback does not redraw anything.
  */
 export function Waveform({
   analysis,
@@ -76,7 +81,9 @@ export function Waveform({
   durationMs,
   positionMs,
   comments,
+  loop,
   onSeek,
+  onLoop,
   onMarker,
 }: {
   analysis: Analysis | null;
@@ -85,7 +92,10 @@ export function Waveform({
   durationMs: number;
   positionMs: number;
   comments: Comment[];
+  loop: Loop | null;
   onSeek: (ms: number) => void;
+  /** A part dragged over, to loop. */
+  onLoop: (loop: Loop) => void;
   onMarker: (comment: Comment) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
@@ -93,6 +103,8 @@ export function Waveform({
   const played = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hover, setHover] = useState<number | null>(null);
+  /** A loop being dragged: where it started and where the pointer is. */
+  const [selecting, setSelecting] = useState<Loop | null>(null);
 
   useEffect(() => {
     const el = box.current;
@@ -131,19 +143,51 @@ export function Waveform({
     return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) * durationMs;
   };
 
+  function onPointerDown(e: React.PointerEvent) {
+    if (e.button !== 0 || durationMs <= 0 || (e.target as HTMLElement).closest("button")) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const at = timeAt(e.clientX);
+    setSelecting([at, at]);
+  }
+
+  function onPointerUp(e: React.PointerEvent) {
+    if (!selecting) return;
+    const [from, to] = [Math.min(...selecting), Math.max(...selecting)];
+    setSelecting(null);
+    if (to - from >= MIN_LOOP_MS) onLoop([from, to]);
+    else onSeek(timeAt(e.clientX));
+  }
+
   const marks = comments.filter((c) => c.timecodeMs !== null && durationMs > 0);
+  const shown = selecting ? ([Math.min(...selecting), Math.max(...selecting)] as Loop) : loop;
   return (
     <div
       ref={box}
       className={`waveform ${analysis ? "" : "loading"}`}
-      onMouseMove={(e) => setHover(timeAt(e.clientX))}
+      title="Щелчок — перейти, протяните — повторять фрагмент"
+      onPointerDown={onPointerDown}
+      onPointerMove={(e) => {
+        const at = timeAt(e.clientX);
+        setHover(at);
+        setSelecting((s) => (s ? [s[0], at] : s));
+      }}
+      onPointerUp={onPointerUp}
+      onPointerCancel={() => setSelecting(null)}
       onMouseLeave={() => setHover(null)}
-      onClick={(e) => durationMs > 0 && onSeek(timeAt(e.clientX))}
     >
       <canvas ref={base} />
       <div className="wave-played" style={{ clipPath: `inset(0 ${(1 - progress) * 100}% 0 0)` }}>
         <canvas ref={played} />
       </div>
+      {shown && durationMs > 0 && (
+        <div
+          className={`wave-loop ${selecting ? "selecting" : ""}`}
+          style={{
+            left: `${(shown[0] / durationMs) * 100}%`,
+            width: `${((shown[1] - shown[0]) / durationMs) * 100}%`,
+          }}
+        />
+      )}
       {hover !== null && durationMs > 0 && (
         <div className="wave-hover" style={{ left: `${(hover / durationMs) * 100}%` }}>
           <span>{formatTime(hover)}</span>
