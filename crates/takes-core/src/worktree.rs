@@ -54,6 +54,30 @@ pub fn scan(root: &Path) -> Result<Vec<WorkFile>> {
     Ok(files)
 }
 
+/// Files inside a folder outside the project, as `/`-separated paths
+/// relative to it, skipping what a project never tracks (a `.takes` folder
+/// of another project, OS clutter).
+pub fn files_in(dir: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let walker = WalkBuilder::new(dir)
+        .standard_filters(false)
+        .follow_links(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(name == META_DIR || name.ends_with(TMP_SUFFIX) || BUILTIN_IGNORES.contains(&&*name))
+        })
+        .build();
+    let mut files = Vec::new();
+    for entry in walker {
+        let entry = entry.map_err(|e| io::Error::other(e.to_string()))?;
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            let abs = entry.into_path();
+            let rel = rel_path(dir, &abs)?;
+            files.push((abs, rel));
+        }
+    }
+    Ok(files)
+}
+
 fn rel_path(root: &Path, abs: &Path) -> Result<String> {
     let invalid = || Error::InvalidPath(abs.display().to_string());
     let rel = abs.strip_prefix(root).map_err(|_| invalid())?;

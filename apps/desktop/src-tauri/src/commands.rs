@@ -150,11 +150,96 @@ pub async fn status(root: String) -> CmdResult<Vec<ChangeDto>> {
     blocking(move || Ok(open(&root)?.status()?.iter().map(Into::into).collect())).await
 }
 
+/// What a version of one file is called when nobody described it.
+fn auto_message(change: &takes_core::Change) -> String {
+    let name = change.path.rsplit('/').next().unwrap_or(&change.path);
+    match change.kind {
+        takes_core::ChangeKind::Added => format!("Новый файл «{name}»"),
+        takes_core::ChangeKind::Modified => format!("Новая версия «{name}»"),
+        takes_core::ChangeKind::Deleted => format!("Удалён «{name}»"),
+    }
+}
+
+/// Saves the changed files under `paths` (all if empty), each as a version
+/// of its own. Without a message, each version is named after its change.
+fn save_each(repo: &mut Repo, paths: &[&str], message: Option<&str>) -> CmdResult<Vec<String>> {
+    let message = message.map(str::trim).filter(|m| !m.is_empty());
+    let ids = repo.commit_each(paths, |change| match message {
+        Some(m) => m.to_owned(),
+        None => auto_message(change),
+    })?;
+    Ok(ids.iter().map(|id| id.to_hex()).collect())
+}
+
 #[tauri::command]
-pub async fn commit(root: String, message: String, paths: Vec<String>) -> CmdResult<String> {
+pub async fn commit(
+    root: String,
+    message: Option<String>,
+    paths: Vec<String>,
+) -> CmdResult<Vec<String>> {
     blocking(move || {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-        Ok(open(&root)?.commit(&message, &paths)?.to_hex())
+        save_each(&mut open(&root)?, &paths, message.as_deref())
+    })
+    .await
+}
+
+/// Copies files or folders from elsewhere into the project (under `dest`,
+/// or as `as_path` for a single file) and, with `save`, saves each file as
+/// a version of its own.
+#[tauri::command]
+pub async fn import_files(
+    root: String,
+    sources: Vec<String>,
+    dest: String,
+    as_path: Option<String>,
+    message: Option<String>,
+    save: bool,
+) -> CmdResult<ImportDto> {
+    blocking(move || {
+        let mut repo = open(&root)?;
+        let imported = match (&as_path, sources.as_slice()) {
+            (Some(path), [source]) => vec![repo.import_as(Path::new(source), path)?],
+            (Some(_), _) => return Err(CommandError::other("one file at a time")),
+            (None, _) => {
+                let sources: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+                repo.import(&sources, &dest)?
+            }
+        };
+        let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
+        let saved = if save && !paths.is_empty() {
+            match save_each(&mut repo, &paths, message.as_deref()) {
+                Ok(ids) => ids.len(),
+                // The copies are identical to what is saved.
+                Err(e) if e.kind == "nothingToCommit" => 0,
+                Err(e) => return Err(e),
+            }
+        } else {
+            0
+        };
+        Ok(ImportDto {
+            replaced: imported.iter().filter(|i| i.replaced).count(),
+            paths: imported.into_iter().map(|i| i.path).collect(),
+            saved,
+        })
+    })
+    .await
+}
+
+/// Every version of every branch with what it changed, for the diagram.
+#[tauri::command]
+pub async fn history_graph(root: String) -> CmdResult<Vec<GraphVersionDto>> {
+    blocking(move || {
+        let repo = open(&root)?;
+        repo.all_versions()?
+            .iter()
+            .map(|s| {
+                Ok(GraphVersionDto {
+                    snapshot: s.into(),
+                    changes: repo.changes_in(s.id)?.iter().map(Into::into).collect(),
+                })
+            })
+            .collect()
     })
     .await
 }
@@ -282,9 +367,11 @@ pub async fn create_branch(
 ) -> CmdResult<()> {
     blocking(move || {
         let mut repo = open(&root)?;
-        repo.create_branch(name.trim(), from.as_deref())?;
+        // Together, so a failed switch does not leave the name taken.
         if switch_to {
-            repo.switch(name.trim())?;
+            repo.branch_off(name.trim(), from.as_deref())?;
+        } else {
+            repo.create_branch(name.trim(), from.as_deref())?;
         }
         Ok(())
     })

@@ -1,8 +1,8 @@
 // UI preview with fake data, no Rust backend: run `npm run dev` and open
 // http://localhost:1420/dev/mock.html in a browser.
 
-import { mockConvertFileSrc, mockIPC } from "@tauri-apps/api/mocks";
-import type { Change, MergePreview, Overview, Snapshot } from "../src/api";
+import { mockConvertFileSrc, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import type { Change, GraphVersion, MergePreview, Overview, Snapshot } from "../src/api";
 
 const root = "/home/me/Music/Ночной альбом";
 const now = Math.floor(Date.now() / 1000);
@@ -16,6 +16,30 @@ const log: Snapshot[] = [
   { id: id(2), parents: [id(1)], message: "Добавил обложку и черновик трек-листа", author: "nikita", createdAt: now - 86400 * 9 },
   { id: id(1), parents: [], message: "Первые демки", author: "nikita", createdAt: now - 86400 * 30 },
 ];
+
+/** The project diagram: one file per version, three branches, a merge. */
+const graph: GraphVersion[] = (
+  [
+    [6, [16, 4], "Merge 'acoustic' into 'main'", "nikita", 600, [["02 Ночь/demo.wav", "modified"], ["02 Ночь/lyrics.txt", "modified"]]],
+    [16, [5], "Обложка: финальный вариант", "masha", 3600 * 2, [["cover.png", "modified"]]],
+    [5, [14], "Ночь: новый текст второго куплета", "nikita", 3600 * 3, [["02 Ночь/lyrics.txt", "modified"]]],
+    [4, [3], "Акустическая версия «Ночи»: гитара + вокал", "masha", 3600 * 26, [["02 Ночь/demo.wav", "modified"]]],
+    [14, [3], "Ночь: перезаписал вокал", "nikita", 3600 * 30, [["02 Ночь/demo.wav", "modified"]]],
+    [3, [13], "Intro: переписал синты, убрал лишний пад", "nikita", 86400 * 3, [["01 Intro.wav", "modified"]]],
+    [13, [2], "Проект «Рассвета»", "nikita", 86400 * 5, [["03 Рассвет/Рассвет.als", "added"]]],
+    [2, [12], "Черновик обложки", "masha", 86400 * 9, [["cover.png", "added"]]],
+    [12, [11], "Текст «Ночи»", "nikita", 86400 * 20, [["02 Ночь/lyrics.txt", "added"]]],
+    [11, [1], "Демо «Ночи»", "nikita", 86400 * 25, [["02 Ночь/demo.wav", "added"]]],
+    [1, [], "Первые демки: Intro", "nikita", 86400 * 30, [["01 Intro.wav", "added"]]],
+  ] as [number, number[], string, string, number, [string, Change["kind"]][]][]
+).map(([n, parents, message, author, ago, changes]) => ({
+  id: id(n),
+  parents: parents.map(id),
+  message,
+  author,
+  createdAt: now - ago,
+  changes: changes.map(([path, kind]) => ({ path, kind, size: null, pruned: false, labels: [] })),
+}));
 
 const overview: Overview = {
   root,
@@ -145,6 +169,7 @@ const comments = [
   { id: 3, snapshot: id(6), path: "01 Intro.wav", timecodeMs: 150_000, text: "Пад слишком широкий", author: "masha", createdAt: now - 86400, resolved: true },
 ];
 
+mockWindows("main");
 mockConvertFileSrc("linux");
 // Generated samples stand in for files the mock cannot read.
 const internals = (window as unknown as { __TAURI_INTERNALS__: { convertFileSrc: (p: string, s?: string) => string } })
@@ -232,6 +257,14 @@ mockIPC(
               lastSync: now - 3600,
               auto: true,
             };
+      case "plugin:dialog|open":
+        return ["/home/me/Downloads/Ночь_final_v7.wav", "/home/me/Downloads/Stems"];
+      case "history_graph":
+        return params.has("empty") ? [] : graph;
+      case "commit":
+        return [id(30)];
+      case "import_files":
+        return { paths: ["Stems/bass.wav", "Ночь.wav"], replaced: 1, saved: 2 };
       case "cleanup":
         return a.olderThanDays === null
           ? { versions: 3, contents: 0, bytes: 96_000_000 }

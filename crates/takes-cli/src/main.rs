@@ -30,13 +30,25 @@ enum Command {
     Init { path: Option<PathBuf> },
     /// Show what changed since the last saved version
     Status,
-    /// Save a new version of the changed files
+    /// Save the changed files, each as a version of its own
     #[command(alias = "save")]
     Commit {
         #[arg(short, long)]
         message: String,
         /// Only save these files or folders
         paths: Vec<PathBuf>,
+    },
+    /// Copy files or folders from elsewhere into the project and save each
+    /// file as a version (a file with the same name gets a new version)
+    Add {
+        #[arg(required = true)]
+        sources: Vec<PathBuf>,
+        /// Folder in the project to put them in (default: the top)
+        #[arg(long, value_name = "DIR", default_value = "")]
+        to: String,
+        /// Description of the new versions (default: what happened to each file)
+        #[arg(short, long)]
+        message: Option<String>,
     },
     /// Version history of the project, or of one file
     Log {
@@ -316,8 +328,37 @@ fn run(command: Command) -> Result<ExitCode> {
                 .map(|p| project_path(&repo, p))
                 .collect::<Result<Vec<_>>>()?;
             let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-            let id = repo.commit(&message, &paths)?;
-            println!("[{} {}] {message}", repo.current_branch()?, id.short());
+            let mut saved = Vec::new();
+            repo.commit_each(&paths, |change| {
+                saved.push(format_change(change));
+                message.clone()
+            })?;
+            print_saved(&repo, &saved)?;
+        }
+
+        Command::Add {
+            sources,
+            to,
+            message,
+        } => {
+            let mut repo = open()?;
+            let imported = repo.import(&sources, &to)?;
+            let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
+            let mut saved = Vec::new();
+            match repo.commit_each(&paths, |change| {
+                saved.push(format_change(change));
+                message.clone().unwrap_or_else(|| match change.kind {
+                    ChangeKind::Added => format!("Add {}", change.path),
+                    _ => format!("New version of {}", change.path),
+                })
+            }) {
+                Ok(_) => print_saved(&repo, &saved)?,
+                // Copied files identical to the saved ones.
+                Err(Error::NothingToCommit) => {
+                    println!("Nothing new: the files are already saved.")
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
 
         Command::Log { rev, file, limit } => {
@@ -405,9 +446,10 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::Switch { name, create } => {
             let mut repo = open()?;
             if create {
-                repo.create_branch(&name, None)?;
+                repo.branch_off(&name, None)?;
+            } else {
+                repo.switch(&name)?;
             }
-            repo.switch(&name)?;
             println!("Now on branch {name}");
         }
 
@@ -846,6 +888,17 @@ fn print_report(r: &SyncReport) {
             d.branch, d.device, d.rev
         );
     }
+}
+
+/// Lists the versions just saved, one per file.
+fn print_saved(repo: &Repo, saved: &[String]) -> Result<()> {
+    let branch = repo.current_branch()?;
+    let log = repo.log(None)?;
+    // The new versions are the latest ones, newest first in the log.
+    for (snapshot, change) in log.iter().take(saved.len()).rev().zip(saved) {
+        println!("[{branch} {}] {change}", snapshot.id.short());
+    }
+    Ok(())
 }
 
 /// Prints a unified diff, in colour on a terminal.

@@ -456,8 +456,60 @@ h2 {
 }
 
 .tab-body {
+  position: relative;
   flex: 1;
   min-height: 0;
+}
+
+/* ---- adding files ---------------------------------------------------------------- */
+
+.add-menu {
+  position: relative;
+}
+
+.add-menu .popover {
+  width: 230px;
+}
+
+.popover-hint {
+  padding: 6px 8px 4px;
+  font-size: 11.5px;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  background: rgba(18, 17, 20, 0.88);
+  color: var(--text);
+  font-size: 15px;
+  pointer-events: none;
+}
+
+.drop-overlay svg {
+  color: var(--accent);
+}
+
+.import-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.import-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
 }
 
 /* ---- branch menu ------------------------------------------------------------- */
@@ -583,13 +635,76 @@ h2 {
   align-items: center;
   gap: 10px;
   color: var(--muted);
+  cursor: pointer;
 }
 
+/* A label of several lines keeps the box next to its first line. */
+.check.multiline {
+  align-items: flex-start;
+}
+
+.check.multiline input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+/* Drawn by us: native boxes look different (and sit lower) in every web view. */
 input[type="checkbox"] {
-  width: 15px;
-  height: 15px;
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
   margin: 0;
-  accent-color: var(--accent);
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+input[type="checkbox"]::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  background: #1a1208;
+  clip-path: polygon(14% 44%, 0 59%, 40% 100%, 100% 22%, 86% 8%, 40% 70%);
+  transform: scale(0);
+  transition: transform 0.1s;
+}
+
+input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="checkbox"]:indeterminate {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+input[type="checkbox"]:indeterminate::before {
+  height: 2px;
+  clip-path: none;
+  transform: scale(1);
+}
+
+input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .list {
@@ -684,6 +799,25 @@ input[type="checkbox"] {
   color: var(--faint);
 }
 
+.row .file-labels {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+/* In the narrow side panel a row wraps its buttons instead of hiding the name. */
+.bp-panel .row {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.bp-panel .path {
+  flex: 1 1 150px;
+}
+
+.bp-panel .action-slot.wide {
+  min-width: 0;
+}
+
 .size {
   flex-shrink: 0;
   color: var(--faint);
@@ -728,10 +862,64 @@ input[type="checkbox"] {
 .composer-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 8px;
   margin-top: 10px;
   font-size: 12.5px;
+}
+
+.composer-bar > .muted {
+  margin-right: auto;
+}
+
+.composer-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.row.selectable {
+  cursor: pointer;
+}
+
+.row.selectable:hover {
+  background: var(--hover);
+}
+
+.row.selected,
+.row.selected:hover {
+  background: var(--accent-soft);
+}
+
+/* One file at a time: a round marker, not a checkbox. */
+.radio {
+  display: inline-grid;
+  place-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+.row.selected .radio {
+  border-color: var(--accent);
+}
+
+.row.selected .radio::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
 }
 
 /* ---- split views (history, files) ------------------------------------------------ */
@@ -2042,4 +2230,296 @@ input[type="checkbox"] {
 
 .label-picker .file-label:hover {
   opacity: 1;
+}
+
+/* ---- diagram (blueprint) ----------------------------------------------------------- */
+
+.bp-wrap {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.bp {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  background-color: #1b1b1f;
+  /* Large cells in dark lines, small ones in faint light lines. */
+  background-image:
+    linear-gradient(rgba(0, 0, 0, 0.6) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.6) 1px, transparent 1px),
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+}
+
+.bp:active {
+  cursor: grabbing;
+}
+
+.bp-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+
+.bp-wires {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.bp-wire {
+  fill: none;
+  stroke-width: 2;
+  transition: opacity 0.15s;
+}
+
+.bp-wire-exec {
+  stroke: rgba(236, 236, 242, 0.85);
+}
+
+.bp-wire-merge {
+  stroke: rgba(236, 236, 242, 0.5);
+  stroke-dasharray: 6 5;
+}
+
+.bp-wire-song {
+  stroke-width: 2.4;
+  opacity: 0.9;
+}
+
+.bp-wire-branch {
+  stroke: #6fd08c;
+}
+
+.bp-wire.dim {
+  opacity: 0.1;
+}
+
+.bp-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(0, 0, 0, 0.9);
+  border-radius: 9px;
+  background: rgba(24, 24, 28, 0.95);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  transition: opacity 0.15s;
+}
+
+.bp-node.selected {
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.bp-node.dim {
+  opacity: 0.28;
+}
+
+.bp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  border-radius: 8px 8px 0 0;
+  background: linear-gradient(90deg, hsl(var(--hue) 52% 34%), hsl(var(--hue) 48% 24% / 0.5));
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: grab;
+}
+
+.bp-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-kind {
+  flex-shrink: 0;
+  padding: 0 7px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 10.5px;
+}
+
+.bp-kind-added {
+  color: var(--added);
+}
+
+.bp-kind-modified {
+  color: var(--modified);
+}
+
+.bp-kind-deleted {
+  color: var(--deleted);
+}
+
+.bp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px 14px 0;
+  font-size: 12px;
+}
+
+.bp-message,
+.bp-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-meta {
+  font-size: 11px;
+}
+
+.bp-tags {
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.bp-version.head {
+  border-color: rgba(255, 138, 76, 0.7);
+}
+
+.bp-song .bp-head {
+  background: linear-gradient(90deg, hsl(var(--hue) 68% 40%), hsl(var(--hue) 60% 28% / 0.55));
+}
+
+.bp-dir {
+  margin-right: 6px;
+}
+
+.bp-branch {
+  --hue: 140;
+}
+
+.bp-branch .bp-head {
+  background: linear-gradient(90deg, #2c7a49, rgba(34, 88, 55, 0.55));
+}
+
+.bp-branch.current {
+  border-color: var(--accent);
+}
+
+.bp-pin {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+}
+
+.bp-pin-in {
+  left: -6px;
+}
+
+.bp-pin-out {
+  right: -6px;
+}
+
+/* Arrow-shaped like an execution pin. */
+.bp-pin-exec {
+  background: #ececf2;
+  clip-path: polygon(0 0, 55% 0, 100% 50%, 55% 100%, 0 100%);
+}
+
+.bp-pin-data {
+  border: 2px solid hsl(var(--hue) 70% 62%);
+  border-radius: 50%;
+  background: hsl(var(--hue) 70% 62% / 0.35);
+}
+
+.bp-branch .bp-pin-in {
+  border-radius: 50%;
+  background: #6fd08c;
+}
+
+.bp-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bp-legend {
+  position: absolute;
+  bottom: 10px;
+  left: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 11.5px;
+  pointer-events: none;
+}
+
+.bp-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  margin-right: 4px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+.bp-swatch.exec {
+  background: #ececf2;
+}
+
+.bp-swatch.song {
+  background: linear-gradient(90deg, #ff6b9a, #6bc7ff);
+}
+
+.bp-swatch.branch {
+  background: #6fd08c;
+}
+
+.popover.bp-menu {
+  top: auto;
+  right: auto;
+  width: 260px;
+}
+
+.bp-panel {
+  position: relative;
+  width: 440px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.bp-panel-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+}
+
+.bp-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.bp-empty button {
+  pointer-events: auto;
 }

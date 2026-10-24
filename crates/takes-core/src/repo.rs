@@ -18,9 +18,11 @@ use crate::worktree::{self, META_DIR, WorkFile};
 
 mod archive;
 mod cleanup;
+mod import;
 mod meta;
 mod sync;
 pub use cleanup::Cleanup;
+pub use import::Imported;
 pub use meta::FileMeta;
 pub use sync::{
     Blocked, Diverged, SyncPhase, SyncProgress, SyncReport, SyncState, find_remote_projects,
@@ -217,18 +219,39 @@ impl Repo {
 
     /// New branch at `from` (default: the current version). Does not switch.
     pub fn create_branch(&mut self, name: &str, from: Option<&str>) -> Result<Hash> {
+        let id = self.add_branch(name, from)?;
+        self.conn
+            .execute("DELETE FROM deleted_branches WHERE name = ?1", [name])?;
+        Ok(id)
+    }
+
+    /// New branch at `from` (default: the current version), switched to at
+    /// once. If the switch fails (unsaved changes, busy files) the branch is
+    /// not left behind, so the name stays free.
+    pub fn branch_off(&mut self, name: &str, from: Option<&str>) -> Result<Hash> {
+        let id = self.add_branch(name, from)?;
+        if let Err(e) = self.switch(name) {
+            self.conn.execute(
+                "DELETE FROM refs WHERE kind = ?1 AND name = ?2",
+                [BRANCH, name],
+            )?;
+            return Err(e);
+        }
+        self.conn
+            .execute("DELETE FROM deleted_branches WHERE name = ?1", [name])?;
+        Ok(id)
+    }
+
+    fn add_branch(&mut self, name: &str, from: Option<&str>) -> Result<Hash> {
         validate_name(name)?;
         if self.ref_target(BRANCH, name)?.is_some() || name == self.current_branch()? {
             return Err(Error::BranchExists(name.into()));
         }
         let id = self.resolve(from.unwrap_or("HEAD"))?;
-        let tx = self.conn.transaction()?;
-        tx.execute(
+        self.conn.execute(
             "INSERT INTO refs (kind, name, snapshot_id) VALUES (?1, ?2, ?3)",
             params![BRANCH, name, id],
         )?;
-        tx.execute("DELETE FROM deleted_branches WHERE name = ?1", [name])?;
-        tx.commit()?;
         Ok(id)
     }
 
@@ -430,6 +453,22 @@ impl Repo {
                 None => return Ok(Vec::new()),
             },
         };
+        self.snapshots_in_order(&[head])
+    }
+
+    /// Every version a branch or tag leads to, newest first (children
+    /// before their parents): the whole picture, e.g. for a diagram.
+    pub fn all_versions(&self) -> Result<Vec<Snapshot>> {
+        let heads: Vec<Hash> = self
+            .refs(BRANCH)?
+            .into_iter()
+            .chain(self.refs(TAG)?)
+            .map(|(_, id)| id)
+            .collect();
+        self.snapshots_in_order(&heads)
+    }
+
+    fn snapshots_in_order(&self, heads: &[Hash]) -> Result<Vec<Snapshot>> {
         let graph = self.graph()?;
         let mut meta: HashMap<Hash, (String, String, i64)> = {
             let mut stmt = self
@@ -439,7 +478,7 @@ impl Repo {
                 .collect::<rusqlite::Result<_>>()?
         };
         graph
-            .topo_order(head)
+            .topo_order(heads)
             .into_iter()
             .map(|id| {
                 let (message, author, created_at) = meta
@@ -716,12 +755,66 @@ impl Repo {
         let branch = self.current_branch()?;
         let head = self.head()?;
         let mut tree = self.head_tree()?;
+        let (changes, fresh) = self.store_changes(&tree, paths)?;
+        if changes.is_empty() {
+            return Err(Error::NothingToCommit);
+        }
+        let mut blobs = Vec::new();
+        for (change, blob) in changes {
+            apply_change(&mut tree, change, blob, &mut blobs);
+        }
+        let parents: Vec<Hash> = head.into_iter().collect();
+        let id = self.write_snapshot(&branch, &parents, message, &tree, &blobs)?;
+        self.cache_put_all(&fresh)?;
+        Ok(id)
+    }
+
+    /// Saves every changed file under `paths` (empty = everything) as a
+    /// version of its own, one after another, so that each version is about
+    /// exactly one file. `message` names each version after its change.
+    /// Returns the new versions, oldest first.
+    pub fn commit_each(
+        &mut self,
+        paths: &[&str],
+        mut message: impl FnMut(&Change) -> String,
+    ) -> Result<Vec<Hash>> {
+        let _lock = self.lock_shared()?;
+        let branch = self.current_branch()?;
+        let mut parent = self.head()?;
+        let mut tree = self.head_tree()?;
+        let (changes, fresh) = self.store_changes(&tree, paths)?;
+        if changes.is_empty() {
+            return Err(Error::NothingToCommit);
+        }
+        let mut ids = Vec::new();
+        for (change, blob) in changes {
+            let message = message(&change);
+            let mut blobs = Vec::new();
+            apply_change(&mut tree, change, blob, &mut blobs);
+            let parents: Vec<Hash> = parent.into_iter().collect();
+            let id = self.write_snapshot(&branch, &parents, &message, &tree, &blobs)?;
+            parent = Some(id);
+            ids.push(id);
+        }
+        self.cache_put_all(&fresh)?;
+        Ok(ids)
+    }
+
+    /// The changes under `paths` compared with `base`, with the contents of
+    /// added and modified files stored (`None` for deletions), plus stat
+    /// cache rows for the files read.
+    #[allow(clippy::type_complexity)]
+    fn store_changes(
+        &self,
+        base: &Tree,
+        paths: &[&str],
+    ) -> Result<(Vec<(Change, Option<Blob>)>, Vec<(String, u64, i64, Hash)>)> {
         let selected = |path: &str| paths.is_empty() || paths.iter().any(|p| path_matches(p, path));
         // A selected file that has to be read to find out whether it changed
         // is stored right away, so every file is read once.
         let mut stored: HashMap<String, Blob> = HashMap::new();
         let changes: Vec<_> = self
-            .compare_worktree(&tree, |file| {
+            .compare_worktree(base, |file| {
                 if !selected(&file.path) {
                     return Ok(store::hash_file(&file.abs)?.0);
                 }
@@ -733,37 +826,23 @@ impl Repo {
             .into_iter()
             .filter(|(c, _)| selected(&c.path))
             .collect();
-        if changes.is_empty() {
-            return Err(Error::NothingToCommit);
-        }
-        let mut blobs = Vec::new();
+        let mut out = Vec::new();
         let mut fresh = Vec::new();
         for (change, file) in changes {
-            let Some(file) = file else {
-                tree.remove(&change.path);
-                continue;
+            let blob = match file {
+                None => None,
+                Some(file) => Some(match stored.remove(&change.path) {
+                    Some(blob) => blob,
+                    None => {
+                        let blob = self.store_file(&file)?;
+                        fresh.push((file.path, file.size, file.mtime_ns, blob.hash));
+                        blob
+                    }
+                }),
             };
-            let blob = match stored.remove(&change.path) {
-                Some(blob) => blob,
-                None => {
-                    let blob = self.store_file(&file)?;
-                    fresh.push((file.path, file.size, file.mtime_ns, blob.hash));
-                    blob
-                }
-            };
-            tree.insert(
-                change.path,
-                Entry {
-                    blob: blob.hash,
-                    size: blob.size,
-                },
-            );
-            blobs.push(blob);
+            out.push((change, blob));
         }
-        let parents: Vec<Hash> = head.into_iter().collect();
-        let id = self.write_snapshot(&branch, &parents, message, &tree, &blobs)?;
-        self.cache_put_all(&fresh)?;
-        Ok(id)
+        Ok((out, fresh))
     }
 
     fn write_snapshot(
@@ -812,7 +891,9 @@ impl Repo {
     }
 
     /// Moves to another branch, replacing the working files with its latest
-    /// version. Refuses when there are unsaved changes.
+    /// version. Refuses when there are unsaved changes, unless the branch is
+    /// at the current version: then no file changes and unsaved work simply
+    /// comes along (the usual case when starting a branch for it).
     pub fn switch(&mut self, name: &str) -> Result<()> {
         if name == self.current_branch()? {
             return Ok(());
@@ -821,8 +902,10 @@ impl Repo {
             .ref_target(BRANCH, name)?
             .ok_or_else(|| Error::NoSuchBranch(name.into()))?;
         let _lock = self.lock_shared()?;
-        self.ensure_clean()?;
-        self.apply_tree(&self.head_tree()?, &self.tree(target)?)?;
+        if self.head()? != Some(target) {
+            self.ensure_clean()?;
+            self.apply_tree(&self.head_tree()?, &self.tree(target)?)?;
+        }
         self.conn
             .execute("UPDATE head SET branch = ?1 WHERE id = 1", [name])?;
         Ok(())
@@ -1230,16 +1313,26 @@ impl Graph {
         best.into_iter().max_by_key(|id| (self.time_of(id), *id))
     }
 
-    /// Children before parents, newer before older among the ready ones.
-    fn topo_order(&self, head: Hash) -> Vec<Hash> {
-        let members = self.ancestors(head);
+    /// `heads` and everything before them: children before parents, newer
+    /// before older among the ready ones.
+    fn topo_order(&self, heads: &[Hash]) -> Vec<Hash> {
+        let mut members = HashSet::new();
+        for head in heads {
+            if !members.contains(head) {
+                members.extend(self.ancestors(*head));
+            }
+        }
         let mut waiting_children: HashMap<Hash, usize> = HashMap::new();
         for id in &members {
             for parent in self.parents_of(id) {
                 *waiting_children.entry(*parent).or_default() += 1;
             }
         }
-        let mut ready = BinaryHeap::from([(self.time_of(&head), head)]);
+        let mut ready: BinaryHeap<(i64, Hash)> = members
+            .iter()
+            .filter(|id| !waiting_children.contains_key(*id))
+            .map(|id| (self.time_of(id), *id))
+            .collect();
         let mut order = Vec::with_capacity(members.len());
         while let Some((_, id)) = ready.pop() {
             order.push(id);
@@ -1299,6 +1392,25 @@ pub fn validate_name(name: &str) -> Result<()> {
         Err(Error::InvalidName(name.into()))
     } else {
         Ok(())
+    }
+}
+
+/// Puts one change into `tree`, collecting the new content.
+fn apply_change(tree: &mut Tree, change: Change, blob: Option<Blob>, blobs: &mut Vec<Blob>) {
+    match blob {
+        None => {
+            tree.remove(&change.path);
+        }
+        Some(blob) => {
+            tree.insert(
+                change.path,
+                Entry {
+                    blob: blob.hash,
+                    size: blob.size,
+                },
+            );
+            blobs.push(blob);
+        }
     }
 }
 

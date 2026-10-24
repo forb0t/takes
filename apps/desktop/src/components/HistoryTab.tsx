@@ -131,7 +131,7 @@ export function Labels({ labels }: { labels: Label[] | undefined }) {
   );
 }
 
-function VersionDetail({
+export function VersionDetail({
   snapshot,
   overview,
   labels,

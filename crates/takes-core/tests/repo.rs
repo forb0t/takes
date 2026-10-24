@@ -738,3 +738,148 @@ fn labels_follow_the_content() {
         ));
     }
 }
+
+#[test]
+fn a_failed_branch_switch_leaves_the_name_free() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "v1");
+    repo.commit("v1", &[]).unwrap();
+    write(&repo, "song.wav", "v2");
+    repo.commit("v2", &[]).unwrap();
+    write(&repo, "song.wav", "unsaved idea");
+
+    // From an older version the folder would change: refused, and no
+    // half-made branch stays behind.
+    assert!(matches!(
+        repo.branch_off("idea", Some("HEAD~1")),
+        Err(Error::DirtyWorktree(_))
+    ));
+    assert_eq!(repo.branches().unwrap().len(), 1);
+    assert_eq!(read(&repo, "song.wav"), b"unsaved idea");
+
+    // From the current version nothing in the folder changes: the unsaved
+    // idea comes along to the new branch, under the same name.
+    repo.branch_off("idea", None).unwrap();
+    assert_eq!(repo.current_branch().unwrap(), "idea");
+    assert_eq!(read(&repo, "song.wav"), b"unsaved idea");
+    assert_eq!(changes(&repo), [ch("song.wav", ChangeKind::Modified)]);
+}
+
+#[test]
+fn every_file_gets_its_own_version() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "a.wav", "a");
+    write(&repo, "b.wav", "b");
+    write(&repo, "dir/c.wav", "c");
+    let ids = repo
+        .commit_each(&[], |c| format!("add {}", c.path))
+        .unwrap();
+    assert_eq!(ids.len(), 3);
+    let log = repo.log(None).unwrap();
+    let messages: Vec<&str> = log.iter().map(|s| s.message.as_str()).collect();
+    assert_eq!(messages, ["add dir/c.wav", "add b.wav", "add a.wav"]);
+    for snapshot in &log {
+        assert_eq!(repo.changes_in(snapshot.id).unwrap().len(), 1);
+    }
+    assert!(changes(&repo).is_empty());
+
+    // Only what is asked for, a deletion included.
+    write(&repo, "a.wav", "a2");
+    fs::remove_file(repo.root().join("b.wav")).unwrap();
+    let ids = repo.commit_each(&["b.wav"], |_| "gone".into()).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        repo.changes_in(ids[0]).unwrap(),
+        [Change {
+            path: "b.wav".into(),
+            kind: ChangeKind::Deleted
+        }]
+    );
+    assert_eq!(changes(&repo), [ch("a.wav", ChangeKind::Modified)]);
+}
+
+#[test]
+fn files_and_folders_come_in_from_outside() {
+    let (dir, mut repo) = setup();
+    write(&repo, "Ночь.wav", "old mix");
+    repo.commit("old", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let bounce = outside.path().join("Ночь.wav");
+    fs::write(&bounce, "new mix").unwrap();
+    let stems = outside.path().join("Stems");
+    fs::create_dir_all(stems.join("drums")).unwrap();
+    fs::write(stems.join("bass.wav"), "bass").unwrap();
+    fs::write(stems.join("drums/kick.wav"), "kick").unwrap();
+    fs::write(stems.join(".DS_Store"), "junk").unwrap();
+
+    let mut imported = repo.import(&[bounce.clone(), stems], "").unwrap();
+    imported.sort_by(|a, b| a.path.cmp(&b.path));
+    let summary: Vec<(&str, bool)> = imported
+        .iter()
+        .map(|i| (i.path.as_str(), i.replaced))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("Stems/bass.wav", false),
+            ("Stems/drums/kick.wav", false),
+            ("Ночь.wav", true)
+        ]
+    );
+    assert_eq!(read(&repo, "Ночь.wav"), b"new mix");
+    let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
+    assert_eq!(
+        repo.commit_each(&paths, |c| c.path.clone()).unwrap().len(),
+        3
+    );
+
+    // Into a subfolder; unsaved work is never replaced.
+    repo.import(std::slice::from_ref(&bounce), "Демо").unwrap();
+    assert_eq!(read(&repo, "Демо/Ночь.wav"), b"new mix");
+    write(&repo, "Ночь.wav", "unsaved");
+    assert!(matches!(
+        repo.import(&[bounce], ""),
+        Err(Error::WouldOverwrite(p)) if p == ["Ночь.wav"]
+    ));
+    assert_eq!(read(&repo, "Ночь.wav"), b"unsaved");
+    // Files already in the project are not imported into it again.
+    assert!(matches!(
+        repo.import(&[dir.path().join("Ночь.wav")], ""),
+        Err(Error::InvalidPath(_))
+    ));
+}
+
+#[test]
+fn all_versions_spans_every_branch() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "a.wav", "a");
+    repo.commit("base", &[]).unwrap();
+    repo.branch_off("idea", None).unwrap();
+    write(&repo, "b.wav", "b");
+    repo.commit("on idea", &[]).unwrap();
+    repo.switch("main").unwrap();
+    write(&repo, "c.wav", "c");
+    repo.commit("on main", &[]).unwrap();
+    let all = repo.all_versions().unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(all.last().unwrap().message, "base");
+    assert_eq!(repo.log(None).unwrap().len(), 2);
+}
+
+#[test]
+fn a_file_with_another_name_becomes_a_new_version() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "Ночь/mix.wav", "mix 1");
+    repo.commit("mix", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let bounce = outside.path().join("Night_mix_final_v7.wav");
+    fs::write(&bounce, "mix 2").unwrap();
+    let imported = repo.import_as(&bounce, "Ночь/mix.wav").unwrap();
+    assert!(imported.replaced);
+    assert_eq!(read(&repo, "Ночь/mix.wav"), b"mix 2");
+    assert_eq!(changes(&repo), [ch("Ночь/mix.wav", ChangeKind::Modified)]);
+    assert!(matches!(
+        repo.import_as(outside.path(), "x.wav"),
+        Err(Error::InvalidPath(_))
+    ));
+}

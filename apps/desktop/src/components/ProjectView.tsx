@@ -1,17 +1,24 @@
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorText, type Change, type DivergedBranch, type Overview, type Stats, type SyncState } from "../api";
 import { Icon, PromptDialog, useToast } from "../ui";
 import { formatSize, prettyPath } from "../util";
+import { BlueprintTab } from "./BlueprintTab";
 import { BranchMenu } from "./BranchMenu";
 import { ChangesTab } from "./ChangesTab";
 import { CleanupDialog } from "./CleanupDialog";
 import { FilesTab } from "./FilesTab";
 import { HistoryTab } from "./HistoryTab";
+import { ImportDialog } from "./ImportDialog";
 import { MergeDialog } from "./MergeDialog";
 import { SyncControl } from "./SyncControl";
 
-type Tab = "changes" | "history" | "files";
+type Tab = "changes" | "blueprint" | "history" | "files";
+
+/** Files to bring into the project; `asPath` makes one the new version of that file. */
+type Importing = { sources: string[]; asPath?: string };
 
 export function ProjectView({ root }: { root: string }) {
   const toast = useToast();
@@ -26,6 +33,12 @@ export function ProjectView({ root }: { root: string }) {
   const [mergeFrom, setMergeFrom] = useState<DivergedBranch | null>(null);
   const [cleanup, setCleanup] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [importing, setImporting] = useState<Importing | null>(null);
+  const [dropping, setDropping] = useState(false);
+  const [mergeBranch, setMergeBranch] = useState<string | null>(null);
+  /** A file to show in the Files tab (e.g. from the diagram). */
+  const [focusPath, setFocusPath] = useState<string | null>(null);
+  const [addMenu, setAddMenu] = useState(false);
 
   // Status can take a while on big files; never run two at once, but
   // remember that another run was requested meanwhile.
@@ -90,6 +103,42 @@ export function ProjectView({ root }: { root: string }) {
     refreshAll();
   }, [refreshAll]);
 
+  // Files dragged onto the window from a file manager are added.
+  useEffect(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((e) => {
+      if (e.payload.type === "enter" || e.payload.type === "over") setDropping(true);
+      else if (e.payload.type === "leave") setDropping(false);
+      else if (e.payload.type === "drop") {
+        setDropping(false);
+        if (e.payload.paths.length > 0) setImporting({ sources: e.payload.paths });
+      }
+    });
+    return () => {
+      unlisten.then((f) => f()).catch(() => {});
+    };
+  }, []);
+
+  async function pickToAdd(what: "files" | "folder") {
+    setAddMenu(false);
+    const picked = await open(
+      what === "files"
+        ? { multiple: true, title: "Файлы для проекта" }
+        : { directory: true, title: "Папка для проекта" },
+    );
+    const sources = typeof picked === "string" ? [picked] : (picked ?? []);
+    if (sources.length > 0) setImporting({ sources });
+  }
+
+  async function uploadVersion(path: string) {
+    const picked = await open({ multiple: false, title: `Новая версия «${path.split("/").pop()}»` });
+    if (typeof picked === "string") setImporting({ sources: [picked], asPath: path });
+  }
+
+  function openFile(path: string) {
+    setFocusPath(path);
+    setTab("files");
+  }
+
   // Follow changes made in other apps.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -134,6 +183,22 @@ export function ProjectView({ root }: { root: string }) {
           <button className="chip" title="Автор новых версий" onClick={() => setEditAuthor(true)}>
             {overview.author} <Icon name="edit" size={12} />
           </button>
+          <div className="add-menu">
+            <button className="btn" onClick={() => setAddMenu((o) => !o)} title="Скопировать файлы или папку в проект">
+              <Icon name="plus" /> Добавить
+            </button>
+            {addMenu && (
+              <div className="popover" onMouseLeave={() => setAddMenu(false)}>
+                <button className="popover-main" onClick={() => pickToAdd("files")}>
+                  <Icon name="wave" size={14} /> Файлы…
+                </button>
+                <button className="popover-main" onClick={() => pickToAdd("folder")}>
+                  <Icon name="folder" size={14} /> Папку…
+                </button>
+                <div className="popover-hint muted">Или перетащите их в окно</div>
+              </div>
+            )}
+          </div>
           <BranchMenu overview={overview} onChanged={refreshAll} />
           <SyncControl root={root} projectName={overview.name} state={syncState} onSynced={refreshAll} />
         </div>
@@ -174,6 +239,9 @@ export function ProjectView({ root }: { root: string }) {
         <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
           Изменения {count > 0 && <span className="badge">{count}</span>}
         </button>
+        <button className={tab === "blueprint" ? "active" : ""} onClick={() => setTab("blueprint")}>
+          Схема
+        </button>
         <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
           История
         </button>
@@ -184,10 +252,35 @@ export function ProjectView({ root }: { root: string }) {
 
       <div className="tab-body">
         {tab === "changes" && (
-          <ChangesTab overview={overview} changes={changes} statusError={statusError} onChanged={refreshAll} />
+          <ChangesTab
+            overview={overview}
+            changes={changes}
+            statusError={statusError}
+            onChanged={refreshAll}
+            onAddFiles={() => pickToAdd("files")}
+          />
+        )}
+        {tab === "blueprint" && (
+          <BlueprintTab
+            overview={overview}
+            onChanged={refreshAll}
+            onAddFiles={pickToAdd}
+            onOpenFile={openFile}
+            onUploadVersion={uploadVersion}
+            onMerge={setMergeBranch}
+          />
         )}
         {tab === "history" && <HistoryTab overview={overview} onChanged={refreshAll} />}
-        {tab === "files" && <FilesTab overview={overview} onChanged={refreshAll} />}
+        {tab === "files" && (
+          <FilesTab overview={overview} focusPath={focusPath} onChanged={refreshAll} onUploadVersion={uploadVersion} />
+        )}
+        {dropping && (
+          <div className="drop-overlay">
+            <Icon name="plus" size={28} />
+            <div>Отпустите, чтобы добавить в «{overview.name}»</div>
+            <div className="muted">Каждый файл сохранится отдельной версией</div>
+          </div>
+        )}
       </div>
 
       {mergeFrom && (
@@ -197,6 +290,24 @@ export function ProjectView({ root }: { root: string }) {
           initialSource={mergeFrom.rev}
           onClose={() => setMergeFrom(null)}
           onMerged={refreshAll}
+        />
+      )}
+      {mergeBranch && (
+        <MergeDialog
+          overview={overview}
+          remoteSources={syncState?.diverged ?? []}
+          initialSource={mergeBranch}
+          onClose={() => setMergeBranch(null)}
+          onMerged={refreshAll}
+        />
+      )}
+      {importing && (
+        <ImportDialog
+          overview={overview}
+          sources={importing.sources}
+          asPath={importing.asPath}
+          onClose={() => setImporting(null)}
+          onDone={refreshAll}
         />
       )}
       {cleanup && (

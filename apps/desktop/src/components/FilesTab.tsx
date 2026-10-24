@@ -6,7 +6,18 @@ import { formatDate, formatSize, short, splitPath } from "../util";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { useFileActions } from "./useFileActions";
 
-export function FilesTab({ overview, onChanged }: { overview: Overview; onChanged: () => void }) {
+export function FilesTab({
+  overview,
+  focusPath,
+  onChanged,
+  onUploadVersion,
+}: {
+  overview: Overview;
+  /** A file to select, e.g. when coming from the diagram. */
+  focusPath?: string | null;
+  onChanged: () => void;
+  onUploadVersion: (path: string) => void;
+}) {
   const root = overview.root;
   const head = overview.head;
   const [files, setFiles] = useState<FileInfo[] | null>(null);
@@ -24,13 +35,23 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
       .then((list) => {
         if (!alive) return;
         setFiles(list);
-        setSelected((s) => (s && list.some((f) => f.path === s) ? s : (list[0]?.path ?? null)));
+        setSelected((s) =>
+          focusPath && list.some((f) => f.path === focusPath)
+            ? focusPath
+            : s && list.some((f) => f.path === s)
+              ? s
+              : (list[0]?.path ?? null),
+        );
       })
       .catch((e) => alive && setError(errorText(e)));
     return () => {
       alive = false;
     };
   }, [root, head, labelsVersion]);
+
+  useEffect(() => {
+    if (focusPath && files?.some((f) => f.path === focusPath)) setSelected(focusPath);
+  }, [focusPath, files]);
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -105,6 +126,7 @@ export function FilesTab({ overview, onChanged }: { overview: Overview; onChange
             labelsVersion={labelsVersion}
             onChanged={onChanged}
             onLabels={() => setLabelsVersion((v) => v + 1)}
+            onUploadVersion={() => onUploadVersion(selected)}
           />
         ) : (
           <div className="center muted">Выберите файл</div>
@@ -120,12 +142,14 @@ function FileHistory({
   labelsVersion,
   onChanged,
   onLabels,
+  onUploadVersion,
 }: {
   root: string;
   path: string;
   labelsVersion: number;
   onChanged: () => void;
   onLabels: () => void;
+  onUploadVersion: () => void;
 }) {
   const actions = useFileActions(root, onChanged);
   const [versions, setVersions] = useState<FileVersion[] | null>(null);
@@ -149,6 +173,15 @@ function FileHistory({
       <div className="detail-head">
         <h2>{name}</h2>
         {dir && <div className="detail-meta">{dir}</div>}
+        <div className="detail-actions">
+          <button
+            className="btn"
+            onClick={onUploadVersion}
+            title="Выбрать файл на компьютере (имя может быть любым) и сохранить его новой версией этого файла"
+          >
+            <Icon name="download" /> Загрузить новую версию…
+          </button>
+        </div>
       </div>
       <div className="section-title">
         Версии файла{versions ? ` · ${versions.length}` : ""}

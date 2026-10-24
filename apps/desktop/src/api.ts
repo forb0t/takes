@@ -55,6 +55,20 @@ export interface FileVersion {
   labels: string[];
 }
 
+/** A version with what it changed, for the diagram. */
+export interface GraphVersion extends Snapshot {
+  changes: Change[];
+}
+
+export interface ImportResult {
+  /** Where the copied files are in the project. */
+  paths: string[];
+  /** How many replaced a saved file of the same name. */
+  replaced: number;
+  /** Versions saved for them. */
+  saved: number;
+}
+
 /** Labels, tempo and key a musician set on a file content. */
 export interface FileMeta {
   labels: string[];
@@ -208,8 +222,23 @@ export const api = {
 
   overview: (root: string) => invoke<Overview>("overview", { root }),
   status: (root: string) => invoke<Change[]>("status", { root }),
-  commit: (root: string, message: string, paths: string[]) =>
-    invoke<string>("commit", { root, message, paths }),
+  /** Saves each changed file under `paths` as a version of its own; returns them oldest first. */
+  commit: (root: string, message: string | null, paths: string[]) =>
+    invoke<string[]>("commit", { root, message, paths }),
+  importFiles: (
+    root: string,
+    sources: string[],
+    options: { dest?: string; asPath?: string | null; message?: string | null; save: boolean },
+  ) =>
+    invoke<ImportResult>("import_files", {
+      root,
+      sources,
+      dest: options.dest ?? "",
+      asPath: options.asPath ?? null,
+      message: options.message ?? null,
+      save: options.save,
+    }),
+  historyGraph: (root: string) => invoke<GraphVersion[]>("history_graph", { root }),
   log: (root: string, rev: string | null) => invoke<Snapshot[]>("log", { root, rev }),
   snapshotChanges: (root: string, id: string) => invoke<Change[]>("snapshot_changes", { root, id }),
   files: (root: string, rev: string) => invoke<FileInfo[]>("files", { root, rev }),

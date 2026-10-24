@@ -226,7 +226,7 @@ export function RemoteDialog({
         <input value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
       </label>
 
-      <label className="check">
+      <label className="check multiline">
         <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
         <span>
           Синхронизировать автоматически

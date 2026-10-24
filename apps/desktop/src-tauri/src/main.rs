@@ -21,6 +21,8 @@ fn main() {
             commands::overview,
             commands::status,
             commands::commit,
+            commands::import_files,
+            commands::history_graph,
             commands::log,
             commands::snapshot_changes,
             commands::files,

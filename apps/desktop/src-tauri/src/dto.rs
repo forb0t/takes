@@ -175,6 +175,26 @@ impl From<FileMetaDto> for FileMeta {
     }
 }
 
+/// A version with what it changed, for the diagram.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphVersionDto {
+    #[serde(flatten)]
+    pub snapshot: SnapshotDto,
+    pub changes: Vec<ChangeDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDto {
+    /// Project paths of the copied files.
+    pub paths: Vec<String>,
+    /// How many of them replaced a saved file (new versions of it).
+    pub replaced: usize,
+    /// Versions saved for them (identical copies add none).
+    pub saved: usize,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextDto {
