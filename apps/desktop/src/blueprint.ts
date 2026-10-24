@@ -1,21 +1,28 @@
 /**
- * The project diagram: one lane per song (file) with its versions from left
- * to right and, at the end, the file as it is on disk when it is not saved.
- * A song's versions on other branches fork into rows below and merges join
- * them back, so each lane is that song's own history.
+ * The project diagram, drawn as a blueprint: one lane per song (file) that
+ * starts with the song's own node, then its versions from left to right
+ * and, at the end, the file as it is on disk when it is not saved. A song's
+ * versions on other branches fork into rows below and merges join them
+ * back, so each lane is that song's own history.
  */
 import type { Branch, ChangeKind, GraphVersion } from "./api";
 import type { FileStatus, ProjectFile } from "./components/FilesTab";
 import { naturalCompare } from "./util";
 
-/** Geometry, in CSS pixels at 100%. */
-export const HEAD_W = 280;
-export const NODE_W = 208;
-export const NODE_H = 80;
-export const COL_W = 244;
-export const ROW_H = 100;
-export const LANE_PAD = 14;
-export const BODY_PAD = 24;
+/** Geometry, in canvas pixels at 100%. */
+export const SONG_W = 248;
+export const NODE_W = 232;
+export const NODE_H = 104;
+/** The coloured title of a node. */
+export const HEAD_H = 28;
+/** Execution pins, from the top of a node. */
+export const PIN_Y = HEAD_H + 14;
+export const COL_W = NODE_W + 64;
+export const ROW_H = NODE_H + 26;
+export const LANE_PAD = 18;
+export const LANE_GAP = 30;
+/** The first version sits past the song's own node and a wire's length. */
+const FIRST_X = LANE_PAD + SONG_W + 64;
 
 /** A version in which the song changed. */
 export interface SongVersion {
@@ -73,9 +80,10 @@ export interface Lane {
 }
 
 export const laneHeight = (lane: Lane) => LANE_PAD * 2 + lane.rows * ROW_H - (ROW_H - NODE_H);
-export const nodeX = (col: number) => BODY_PAD + col * COL_W;
+export const laneWidth = (lane: Lane) =>
+  lane.cols ? FIRST_X + lane.cols * COL_W - (COL_W - NODE_W) + LANE_PAD : LANE_PAD * 2 + SONG_W;
+export const nodeX = (col: number) => FIRST_X + col * COL_W;
 export const nodeY = (row: number) => LANE_PAD + row * ROW_H;
-export const bodyWidth = (cols: number) => BODY_PAD * 2 + Math.max(cols, 1) * COL_W;
 
 /** A stable colour per song. */
 export function songHue(path: string): number {
@@ -314,12 +322,8 @@ export function previousVersion(lane: Lane, node: LaneNode): SongVersion | null 
   return null;
 }
 
-/** A curve from the right side of one node to the left side of another. */
-export function wire(from: { col: number; row: number }, to: { col: number; row: number }): string {
-  const x1 = nodeX(from.col) + NODE_W;
-  const y1 = nodeY(from.row) + NODE_H / 2;
-  const x2 = nodeX(to.col);
-  const y2 = nodeY(to.row) + NODE_H / 2;
-  const pull = Math.max(18, (x2 - x1) / 2);
+/** A wire from an output pin to an input pin, as in a blueprint. */
+export function wire(x1: number, y1: number, x2: number, y2: number): string {
+  const pull = Math.max(32, Math.abs(x2 - x1) / 2);
   return `M ${x1} ${y1} C ${x1 + pull} ${y1}, ${x2 - pull} ${y2}, ${x2} ${y2}`;
 }

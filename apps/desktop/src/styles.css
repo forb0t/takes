@@ -2367,7 +2367,7 @@ input[type="checkbox"]:disabled {
   opacity: 1;
 }
 
-/* ---- diagram: lanes of songs ------------------------------------------------------- */
+/* ---- diagram: a blueprint of songs ------------------------------------------------- */
 
 .bp-wrap {
   position: relative;
@@ -2400,22 +2400,25 @@ input[type="checkbox"]:disabled {
   font-size: 11.5px;
 }
 
-.bp-swatch-node {
+.bp-sw {
   width: 16px;
-  height: 11px;
+  height: 10px;
   margin-left: 6px;
-  border: 1px solid var(--border-strong);
   border-radius: 3px;
-  background: var(--raised);
+  background: var(--head);
 }
 
-.bp-swatch-node.work {
-  border: 1px dashed var(--accent);
-  background: transparent;
-}
-
-.bp-legend .bp-here {
-  margin-left: 6px;
+.bp-help {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: help;
 }
 
 .bp-zoom {
@@ -2437,139 +2440,99 @@ input[type="checkbox"]:disabled {
   background: var(--hover);
 }
 
+/* Node title colours, as a blueprint has them: events red, calls blue. */
+.sw-song,
+.bp-song {
+  --head: #a3241c;
+}
+
+.sw-version,
+.bp-version {
+  --head: #2160a8;
+}
+
+.sw-other,
+.bp-version.elsewhere,
+.bp-song.muted {
+  --head: #50505a;
+}
+
+.bp-version.merge {
+  --head: #6b3fa3;
+}
+
+.bp-version.change-deleted {
+  --head: #6e2a2a;
+}
+
+.sw-work,
+.bp-work {
+  --head: #b8650f;
+}
+
+/* The canvas: large cells in dark lines, small ones in faint light lines. */
 .bp {
+  position: relative;
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  background-color: #17161a;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-
-.bp-canvas {
-  min-width: 100%;
-  padding-bottom: 40px;
-}
-
-/* One song: a header that stays on the left while scrolling, then its versions. */
-.bp-lane {
-  position: relative;
-  display: flex;
-  border-bottom: 1px solid var(--border);
-}
-
-.bp-lane.drop-before::before,
-.bp-lane.drop-after::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  z-index: 3;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--accent);
-}
-
-.bp-lane.drop-before::before {
-  top: -2px;
-}
-
-.bp-lane.drop-after::after {
-  bottom: -2px;
-}
-
-.bp-lane.dragging {
-  opacity: 0.55;
-}
-
-.bp-lane-head {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  flex-shrink: 0;
-  width: 280px;
-  padding: 14px 8px 10px 4px;
-  border-right: 1px solid var(--border);
-  border-left: 3px solid hsl(var(--hue) 60% 58%);
-  background: var(--panel);
-  cursor: pointer;
-  user-select: none;
-}
-
-.bp-lane-head:hover,
-.bp-lane.selected .bp-lane-head {
-  background: var(--raised);
-}
-
-.bp-grip {
-  display: inline-flex;
-  padding: 2px 0;
-  color: var(--faint);
-  cursor: grab;
+  overflow: hidden;
   touch-action: none;
+  user-select: none;
+  background-color: #232327;
+  background-image:
+    linear-gradient(#141416 1px, transparent 1px),
+    linear-gradient(90deg, #141416 1px, transparent 1px),
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
 }
 
-.bp-grip:active {
+.bp.panning {
   cursor: grabbing;
 }
 
-.bp-lane-info {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
+.bp-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
 }
 
-.bp-lane-title {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+/* A song's lane, framed like a comment. */
+.bp-lane {
+  position: absolute;
+  left: 0;
+  border: 1px solid hsl(var(--hue) 45% 62% / 0.25);
+  border-top: 3px solid hsl(var(--hue) 55% 60% / 0.7);
+  border-radius: 7px;
+  background: hsl(var(--hue) 40% 55% / 0.06);
 }
 
-.bp-lane-dot {
-  width: 9px;
-  height: 9px;
-  margin: 0 4px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: hsl(var(--hue) 60% 58%);
+.bp-lane.selected {
+  border-color: hsl(var(--hue) 55% 65% / 0.55);
+  border-top-color: hsl(var(--hue) 60% 62%);
+  background: hsl(var(--hue) 40% 55% / 0.1);
 }
 
-.bp-lane-name {
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.bp-lane.lifted {
+  z-index: 5;
+  opacity: 0.92;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
 }
 
-.bp-lane-meta {
-  color: var(--faint);
-  font-size: 12px;
+.bp-lane.lane-removed,
+.bp-lane.lane-elsewhere {
+  opacity: 0.62;
 }
 
-.bp-lane-dir {
-  color: var(--faint);
-}
-
-.bp-lane.lane-removed .bp-lane-name,
-.bp-lane.lane-elsewhere .bp-lane-name {
-  color: var(--muted);
-}
-
-.bp-lane.lane-removed .bp-lane-body,
-.bp-lane.lane-elsewhere .bp-lane-body {
-  opacity: 0.6;
-}
-
-.bp-lane-body {
-  position: relative;
-  flex-shrink: 0;
+.bp-drop {
+  position: absolute;
+  left: 0;
+  z-index: 6;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
 }
 
 .bp-wires {
@@ -2582,114 +2545,229 @@ input[type="checkbox"]:disabled {
 
 .bp-wire {
   fill: none;
-  stroke: hsl(var(--hue) 60% 58%);
-  stroke-width: 2;
+  stroke: #e6e6ec;
+  stroke-width: 2.2;
 }
 
 .bp-wire.elsewhere {
-  stroke-opacity: 0.45;
+  stroke-opacity: 0.4;
+  stroke-dasharray: 7 5;
 }
 
+/* Into the file on disk: not saved yet, so it runs. */
 .bp-wire.work {
-  stroke: var(--accent);
-  stroke-dasharray: 5 4;
+  stroke: #f0a040;
+  stroke-dasharray: 6 5;
+  animation: bp-flow 0.9s linear infinite;
 }
 
-/* A saved version of the song. */
+@keyframes bp-flow {
+  to {
+    stroke-dashoffset: -11;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bp-wire.work {
+    animation: none;
+  }
+}
+
+/* A node: a dark body under a coloured title. */
 .bp-node {
   position: absolute;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px 7px;
-  border: 1px solid var(--border-strong);
-  border-top: 3px solid hsl(var(--hue) 55% 52%);
+  border: 1px solid #060607;
   border-radius: 9px;
-  background: var(--raised);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+  background: rgba(17, 17, 20, 0.95);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   cursor: pointer;
 }
 
 .bp-node:hover {
-  border-color: var(--muted);
-  border-top-color: hsl(var(--hue) 55% 52%);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
 .bp-node.selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 6px 18px rgba(0, 0, 0, 0.3);
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 8px 22px rgba(0, 0, 0, 0.55);
 }
 
-.bp-version.elsewhere {
-  background: var(--panel);
-  border-style: dashed;
-  border-top-style: solid;
-  opacity: 0.85;
-}
-
-.bp-version.change-deleted {
-  border-top-color: var(--deleted);
-}
-
-/* The file on disk, not saved yet. */
 .bp-work {
-  border: 1.5px dashed var(--accent);
-  background: rgba(255, 138, 76, 0.07);
-}
-
-.bp-work:hover {
-  border-color: var(--accent);
+  border: 1px dashed #f0a040;
 }
 
 .bp-node-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0 8px 0 10px;
   overflow: hidden;
-  font-size: 11.5px;
+  border-radius: 8px 8px 0 0;
+  background: linear-gradient(90deg, var(--head), color-mix(in srgb, var(--head) 40%, transparent) 70%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
   white-space: nowrap;
 }
 
-.bp-node-head .file-labels {
+.bp-song .bp-node-head {
+  cursor: grab;
+}
+
+.bp-song .bp-node-head:active {
+  cursor: grabbing;
+}
+
+.bp-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The diamond of an event, in the song's colour. */
+.bp-event {
+  width: 9px;
+  height: 9px;
+  margin: 0 3px 0 1px;
+  flex-shrink: 0;
+  border: 1.5px solid #fff;
+  border-radius: 2px;
+  background: hsl(var(--hue) 70% 60%);
+  transform: rotate(45deg);
+}
+
+.bp-head-btn {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.bp-head-btn:hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.bp-rows {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  padding: 5px 22px 6px;
+}
+
+.bp-song .bp-rows {
+  padding-left: 12px;
+}
+
+.bp-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.bp-row .file-labels {
   flex-wrap: nowrap;
   overflow: hidden;
 }
 
-.bp-num {
-  font-weight: 700;
-  color: var(--text);
+.bp-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bp-msg {
+  font-size: 12.5px;
+}
+
+.bp-msg i,
+.bp-meta {
+  color: var(--faint);
+}
+
+.bp-meta {
+  font-size: 11px;
+}
+
+.bp-foot {
+  margin-top: auto;
+}
+
+.bp-foot .play-btn {
+  min-width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
+
+.bp-foot .btn-small {
+  padding: 2px 10px;
+}
+
+.bp-pin {
+  position: absolute;
+  overflow: visible;
+}
+
+.bp-pin path {
+  fill: none;
+  stroke: #ececf2;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.bp-pin.on path {
+  fill: #ececf2;
+}
+
+.bp-pin-in {
+  left: 5px;
+}
+
+.bp-pin-out {
+  right: 5px;
 }
 
 .bp-here {
+  flex-shrink: 0;
   padding: 0 6px;
   border-radius: 8px;
-  color: var(--added);
-  background: rgba(95, 209, 139, 0.13);
+  color: #7ee2a4;
+  background: rgba(0, 0, 0, 0.35);
   font-size: 10.5px;
   font-weight: 600;
   line-height: 16px;
+  text-shadow: none;
 }
 
 .bp-state {
-  font-size: 11px;
+  flex-shrink: 0;
+  padding: 0 7px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #ffe2b8;
+  font-size: 10.5px;
   font-weight: 600;
-}
-
-.bp-state-modified {
-  color: var(--modified);
-}
-
-.bp-state-added {
-  color: var(--added);
-}
-
-.bp-state-deleted {
-  color: var(--deleted);
-}
-
-.bp-state-renamed {
-  color: var(--renamed);
+  line-height: 16px;
+  text-shadow: none;
 }
 
 .bp-branch,
@@ -2716,42 +2794,47 @@ input[type="checkbox"]:disabled {
   background: rgba(143, 199, 255, 0.12);
 }
 
-.bp-node-msg {
-  overflow: hidden;
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bp-node-msg i {
-  color: var(--faint);
-}
-
-.bp-node-foot {
+/* A song's name at the edge of the canvas while its node is out of sight. */
+.bp-tagline {
+  position: absolute;
+  left: 10px;
+  z-index: 4;
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-width: 0;
-  margin-top: auto;
-  font-size: 11px;
-}
-
-.bp-node-date {
-  overflow: hidden;
-  color: var(--faint);
-  text-overflow: ellipsis;
+  gap: 8px;
+  max-width: 240px;
+  padding: 4px 10px 4px 9px;
+  border: 1px solid #060607;
+  border-radius: 7px;
+  background: rgba(17, 17, 20, 0.92);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
-.bp-node-foot .play-btn {
-  min-width: 22px;
-  height: 22px;
-  font-size: 11px;
+.bp-tagline span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.bp-node-foot .btn-small {
-  padding: 2px 10px;
+.bp-tagline:hover,
+.bp-tagline.selected {
+  border-color: var(--accent);
 }
+
+.bp-watermark {
+  position: absolute;
+  right: 24px;
+  bottom: 14px;
+  color: rgba(255, 255, 255, 0.07);
+  font-size: 44px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+
 
 .popover.bp-menu {
   position: fixed;
@@ -2777,7 +2860,7 @@ input[type="checkbox"]:disabled {
   z-index: 1;
 }
 
-/* A narrow window has no room beside the lanes: the panel covers them. */
+/* A narrow window has no room beside the canvas: the panel covers it. */
 @media (max-width: 1180px) {
   .bp-panel {
     position: absolute;
@@ -2791,9 +2874,5 @@ input[type="checkbox"]:disabled {
 
   .bp-legend {
     display: none;
-  }
-
-  .bp-lane-head {
-    width: 220px;
   }
 }
