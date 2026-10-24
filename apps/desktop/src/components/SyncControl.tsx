@@ -148,7 +148,7 @@ export function SyncControl({
     return (
       <>
         <button className="btn" onClick={() => setSettings(true)} title="Хранить историю в облаке или на другом диске">
-          <Icon name="cloud" /> Синхронизация
+          <Icon name="cloud" /> <span className="btn-label">Синхронизация</span>
         </button>
         {settings && (
           <RemoteDialog
@@ -185,7 +185,7 @@ export function SyncControl({
         <span className={syncing ? "spin" : ""}>
           <Icon name="sync" />
         </span>
-        {syncing ? progressText(progress) : "Синхронизировать"}
+        <span className="btn-label">{syncing ? progressText(progress) : "Синхронизировать"}</span>
         {!syncing && unsent > 0 && <span className="badge">↑{unsent}</span>}
         {!syncing && autoError && <span className="sync-warn" aria-label="ошибка синхронизации" />}
       </button>

@@ -375,21 +375,27 @@ h2 {
   min-height: 0;
 }
 
+/* The tools move under the title when the window is too narrow for both. */
 .project-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px 16px;
   padding: 18px 22px 12px;
 }
 
 .project-title {
+  flex: 1 1 180px;
   min-width: 0;
 }
 
 .project-title h1 {
+  overflow: hidden;
   font-size: 20px;
   letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-path {
@@ -411,9 +417,24 @@ h2 {
 
 .project-tools {
   display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: 8px 10px;
+  margin-left: auto;
+}
+
+/* Narrow windows: the sync button keeps its icon and counter (its tooltip
+   says the rest), so the header stays on one line longer. */
+@media (max-width: 1180px) {
+  .project-tools .btn:not(.busy) .btn-label {
+    display: none;
+  }
+
+  .sync-main:not(.busy) {
+    min-width: 0;
+  }
 }
 
 .tabs {
@@ -814,8 +835,17 @@ input[type="checkbox"]:disabled {
   flex: 1 1 150px;
 }
 
+/* Buttons get a line of their own: playback on the right edge of every
+   row, the hover actions on the left. */
+.bp-panel .row-actions {
+  flex-basis: 100%;
+  justify-content: flex-end;
+}
+
 .bp-panel .action-slot.wide {
+  order: -1;
   min-width: 0;
+  margin-right: auto;
 }
 
 .size {
@@ -1146,8 +1176,10 @@ input[type="checkbox"]:disabled {
   color: var(--accent);
 }
 
+/* The name keeps a few letters however many labels the file has. */
 .file-name {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 4.5em;
   overflow: hidden;
   text-align: left;
   text-overflow: ellipsis;
@@ -1156,19 +1188,20 @@ input[type="checkbox"]:disabled {
 
 .file .file-labels {
   flex-wrap: nowrap;
-  flex-shrink: 0;
+  overflow: hidden;
 }
 
 .versions {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  container-type: inline-size;
 }
 
 .version {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1184,10 +1217,23 @@ input[type="checkbox"]:disabled {
   min-width: 0;
 }
 
+/* In a narrow window every version shows its buttons under the description. */
+@container (max-width: 600px) {
+  .version {
+    flex-wrap: wrap;
+  }
+
+  .version-main {
+    flex-basis: 100%;
+  }
+}
+
+/* Labels wrap under a long message instead of squeezing it to a few letters. */
 .version-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
 }
 
 .version-title .file-labels,
@@ -1197,6 +1243,8 @@ input[type="checkbox"]:disabled {
 }
 
 .version-message {
+  /* Room for the kind badge before it on the first line. */
+  max-width: calc(100% - 26px);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1872,12 +1920,12 @@ input[type="checkbox"]:disabled {
 
 .field-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
 }
 
 .field-row.align-end {
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
 }
 
@@ -1928,10 +1976,6 @@ input[type="checkbox"]:disabled {
 
 .grow-right {
   margin-right: auto;
-}
-
-.add-menu {
-  position: relative;
 }
 
 .popover-left {
@@ -2517,6 +2561,7 @@ input[type="checkbox"]:disabled {
   inset: 0;
   display: grid;
   place-items: center;
+  text-align: center;
   pointer-events: none;
 }
 
