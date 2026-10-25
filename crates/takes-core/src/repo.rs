@@ -31,7 +31,7 @@ pub use sync::{
     Blocked, Diverged, SyncPhase, SyncProgress, SyncReport, SyncState, find_remote_projects,
     is_remote_project,
 };
-pub use variants::TAKE_PREFIX;
+pub use variants::{TAKE_PREFIX, TakeFrom};
 
 pub const DEFAULT_BRANCH: &str = "main";
 

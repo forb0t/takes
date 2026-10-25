@@ -1257,6 +1257,11 @@ input[type="checkbox"]:disabled {
   .version-main {
     flex-basis: 100%;
   }
+
+  .version .row-actions {
+    flex-wrap: wrap;
+    flex-shrink: 1;
+  }
 }
 
 /* Labels wrap under a long message instead of squeezing it to a few letters. */
@@ -2379,6 +2384,26 @@ input[type="checkbox"]:disabled {
   border-color: rgba(95, 209, 139, 0.35);
 }
 
+/* A branch with its versions under it, as the diagram wires them. */
+.song-branch-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.song-branch-group > .versions {
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+  margin-left: 10px;
+}
+
+.song-branch.loose {
+  border-style: dashed;
+  background: none;
+  color: var(--muted);
+}
+
 .song-branch-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2507,6 +2532,17 @@ input[type="checkbox"]:disabled {
 
 .bp-version.merge {
   --head: #6b3fa3;
+}
+
+/* Unplugged: wired into no branch. */
+.bp-version.loose,
+.bp-loose-node {
+  --head: #3c3c46;
+}
+
+.bp-version.loose {
+  outline: 1px dashed rgba(255, 255, 255, 0.28);
+  outline-offset: 2px;
 }
 
 .bp-version.change-deleted {
@@ -2740,30 +2776,10 @@ input[type="checkbox"]:disabled {
   background: rgba(95, 209, 139, 0.05);
 }
 
-.bp-lane.dragging-in .bp-band {
-  border-color: rgba(255, 255, 255, 0.18);
-}
-
-.bp-band.target,
-.bp-lane.dragging-in .bp-band.target {
-  border: 2px solid var(--accent);
-  background: var(--accent-soft);
-}
-
-.bp-band-hint {
-  position: absolute;
-  right: 12px;
-  bottom: 6px;
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-/* While a version is dragged, only the bands catch the pointer. */
-.bp-lane.dragging-in .bp-node,
-.bp-lane.dragging-in .bp-add,
-.bp-lane.dragging-in .bp-lane-title {
-  pointer-events: none;
+/* Versions unplugged from every branch, below the bands. */
+.bp-band.loose {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: none;
 }
 
 .bp-branch-node {
@@ -2802,13 +2818,31 @@ input[type="checkbox"]:disabled {
   background: var(--accent-soft);
 }
 
-.bp-newbranch.target {
+/* Where a pulled wire would go: there, or not there. */
+.bp-add.pull-ok,
+.bp-newbranch.pull-ok {
   border: 2px solid var(--accent);
   color: var(--accent);
   background: var(--accent-soft);
 }
 
-/* A version just moved to another branch. */
+.bp-add.pull-bad,
+.bp-newbranch.pull-bad {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.bp-node.pull-ok {
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 22px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.bp-node.pull-bad {
+  box-shadow: 0 0 0 2px var(--danger);
+}
+
+/* A version just rewired. */
 .bp-node.flash {
   animation: bp-flash 1.5s ease-out;
 }
@@ -2849,11 +2883,80 @@ input[type="checkbox"]:disabled {
   fill: none;
   stroke: #e6e6ec;
   stroke-width: 2.2;
+  pointer-events: none;
 }
 
 .bp-wire.elsewhere {
   stroke-opacity: 0.4;
   stroke-dasharray: 7 5;
+}
+
+.bp-wire.loose {
+  stroke: #9a9aa8;
+  stroke-dasharray: 3 4;
+}
+
+/* A wide stroke nobody sees catches the pointer: a wire is pulled by it, and broken with a double click. */
+.bp-wire-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+}
+
+.bp-wire-g.chain .bp-wire-hit {
+  cursor: grab;
+}
+
+.bp-wire-g.chain:hover .bp-wire {
+  stroke: #fff;
+  stroke-opacity: 1;
+  stroke-width: 3.6;
+}
+
+/* The wire being pulled, over everything. */
+.bp-live {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 20;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.bp-wire.live {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.bp-wire.live.bad {
+  stroke: var(--danger);
+  stroke-dasharray: 6 5;
+}
+
+.bp.wiring,
+.bp.wiring * {
+  cursor: crosshair !important;
+}
+
+.bp-pull-hint {
+  position: absolute;
+  z-index: 30;
+  max-width: 340px;
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: rgba(20, 21, 26, 0.96);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.bp-pull-hint.bad {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 /* Into the file on disk: not saved yet, so it runs. */
@@ -3041,11 +3144,26 @@ input[type="checkbox"]:disabled {
 }
 
 .bp-pin-in {
-  left: 5px;
+  left: 1px;
 }
 
 .bp-pin-out {
-  right: 5px;
+  right: 1px;
+}
+
+.bp-pin-hit {
+  fill: transparent;
+  stroke: none;
+}
+
+.bp-pin.pullable {
+  cursor: crosshair;
+}
+
+.bp-pin.pullable:hover path,
+.bp.wiring .bp-pin.pullable path {
+  stroke: var(--accent);
+  stroke-width: 2;
 }
 
 .bp-here {

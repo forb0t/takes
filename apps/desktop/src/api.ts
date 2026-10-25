@@ -71,6 +71,9 @@ export interface RemovedFile {
 }
 
 /** A version with what it changed, for the diagram. */
+/** What a take of a song is made of: a file outside the project, one in its folder as it is now, or a saved version of a file. */
+export type TakeSource = { outside: string } | { folder: string } | { version: { rev: string; path: string } };
+
 export interface GraphVersion extends Snapshot {
   changes: Change[];
 }
@@ -277,8 +280,8 @@ export const api = {
   setAuthor: (root: string, name: string) => invoke<void>("set_author", { root, name }),
 
   switchBranch: (root: string, name: string) => invoke<void>("switch_branch", { root, name }),
-  /** Saves a file from outside as a version of `path` after version `parent`, beside the folder. */
-  saveTake: (root: string, source: string, path: string, parent: string, variant: string) =>
+  /** Saves a file as a version of `path` after version `parent`, beside the folder. */
+  saveTake: (root: string, source: TakeSource, path: string, parent: string, variant: string) =>
     invoke<string>("save_take", { root, source, path, parent, variant }),
   /** Brings a version into the folder as `path`, saved there; null if it is there already. */
   useTake: (root: string, rev: string, from: string, path: string, variant: string) =>

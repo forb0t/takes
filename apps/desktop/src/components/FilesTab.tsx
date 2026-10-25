@@ -12,7 +12,7 @@ import {
 import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast } from "../ui";
 import { formatDate, formatSize, naturalCompare, plural, previewKind, short, splitPath } from "../util";
-import { shortId, type SongVersion } from "../blueprint";
+import { previousVersion, type Lane, type SongVersion } from "../blueprint";
 import type { Songs } from "../songs";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { SongBranchDialog } from "./SongBranchDialog";
@@ -400,8 +400,8 @@ export function FileDetail({
   const comparable = previewKind(path) !== null;
   const draftBox = useRef<HTMLTextAreaElement>(null);
   const highlighted = useRef<HTMLDivElement>(null);
+  // The versions as the diagram wires them; the history of the folder until it is built.
   const lane = songs.laneOf(path);
-  const branchOf = (id: string) => (lane && lane.branches.length > 1 ? lane.branchOf[shortId(id)] : undefined);
 
   useEffect(() => {
     let alive = true;
@@ -457,7 +457,7 @@ export function FileDetail({
   /** Opens two versions side by side, the older one as A; `null` is the file on disk. */
   function compare(a: FileVersion, b: FileVersion | null) {
     setPick(null);
-    const older = versions && b && versions.indexOf(b) > versions.indexOf(a) ? b : a;
+    const older = b && b.snapshot.createdAt < a.snapshot.createdAt ? b : a;
     const newer = older === a ? b : a;
     player.open([
       versionTrack(older!),
@@ -476,7 +476,111 @@ export function FileDetail({
     onChanged();
   }
 
-  const count = versions?.filter((v) => v.kind !== "deleted").length ?? 0;
+  const total = lane ? lane.versions : (versions?.filter((v) => v.kind !== "deleted").length ?? 0);
+
+  /** One version: what it is, listening, comparing, labels, bringing it back; `here` when the folder has it. */
+  function versionRow(v: FileVersion, previous: FileVersion | undefined, here: boolean) {
+    const id = v.snapshot.id;
+    const exists = v.kind !== "deleted" && !v.pruned;
+    const isHighlight = id === highlight;
+    return (
+      <div key={id} ref={isHighlight ? highlighted : undefined} className={`version ${isHighlight ? "highlight" : ""}`}>
+        <div className="version-main">
+          <div className="version-title">
+            <KindBadge kind={v.kind} />
+            <span className="version-message">{v.snapshot.message || "Без описания"}</span>
+            {v.kind === "renamed" && v.from && (
+              <span className="muted nowrap" title={`Было: ${v.from}`}>
+                из «{splitPath(v.from).name}»
+              </span>
+            )}
+            {v.kind !== "renamed" && v.path !== path && (
+              <span className="muted nowrap" title={v.path}>
+                как «{splitPath(v.path).name}»
+              </span>
+            )}
+            {here && exists && <span className="label label-current">в папке</span>}
+            {v.pruned && (
+              <span className="muted" title="Содержимое удалено при очистке места">
+                удалён при очистке
+              </span>
+            )}
+            <FileLabels labels={v.labels} />
+          </div>
+          <div className="commit-meta">
+            <span>{formatDate(v.snapshot.createdAt)}</span>
+            <span>{v.snapshot.author}</span>
+            <code>{short(id)}</code>
+            {v.size !== null && <span>{formatSize(v.size)}</span>}
+          </div>
+        </div>
+        {exists && (
+          <div className="row-actions">
+            {comparable && total > 1 && (
+              <button
+                className={`btn btn-small btn-ghost ${pick === v ? "picked" : ""}`}
+                title={
+                  pick && pick !== v
+                    ? "Сравнить эту версию с выбранной"
+                    : "Выбрать версию, чтобы сравнить её с любой другой"
+                }
+                onClick={() => (pick && pick !== v ? compare(pick, v) : setPick(pick === v ? null : v))}
+              >
+                <Icon name="wave" size={14} /> {pick === v ? "Выбрана" : pick ? "С этой" : "Сравнить…"}
+              </button>
+            )}
+            {previous && !previous.pruned && (
+              <CompareButton
+                a={{
+                  root,
+                  rev: previous.snapshot.id,
+                  path: previous.path,
+                  label: `Предыдущая · ${previous.snapshot.message}`,
+                }}
+                b={{
+                  root,
+                  rev: id,
+                  path: v.path,
+                  label: `${short(id)} · ${v.snapshot.message}`,
+                }}
+              />
+            )}
+            <PlayButton
+              track={{
+                root,
+                rev: id,
+                path: v.path,
+                label: `Версия ${short(id)} · ${v.snapshot.message}`,
+              }}
+            />
+            <button
+              className="btn btn-small btn-ghost"
+              title="Метки («демо», «мастер»…), темп и тональность"
+              onClick={() => setEditing(v)}
+            >
+              <Icon name="label" size={14} /> Метки
+            </button>
+            <button
+              className="btn btn-small btn-ghost"
+              title="Вернуть файл в папку проекта в этом виде"
+              onClick={() => actions.restore(path, id, v.path)}
+            >
+              <Icon name="restore" size={14} /> Вернуть
+            </button>
+            <button
+              className="btn btn-small btn-ghost"
+              title="Положить эту версию рядом, под другим именем"
+              onClick={() => actions.saveCopy(path, id, short(id), v.path)}
+            >
+              <Icon name="copy" size={14} /> Копия
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const count = total;
   return (
     <div className="detail">
       <div className="detail-head">
@@ -600,12 +704,6 @@ export function FileDetail({
         </div>
       )}
 
-      {lane && !elsewhere && !removed && <SongBranches songs={songs} laneOf={() => songs.laneOf(path)} />}
-
-      <div className="section-title">
-        Версии файла{versions ? ` · ${versions.length}` : ""}
-        {rev && <span className="muted"> · по истории выбранной версии (другая ветка)</span>}
-      </div>
       {pick && (
         <div className="pick-strip">
           <span>
@@ -622,109 +720,37 @@ export function FileDetail({
           </button>
         </div>
       )}
-      {error && <div className="error-text">{error}</div>}
-      {versions?.length === 0 && (
-        <div className="muted">Сохранённых версий ещё нет — сохраните файл, и здесь начнётся его история.</div>
+      {lane ? (
+        <SongVersions
+          songs={songs}
+          lane={lane}
+          editable={!elsewhere && !removed}
+          row={(n) => {
+            const before = previousVersion(lane, n);
+            return versionRow(asFile(n), before ? asFile(before) : undefined, n.inFolder);
+          }}
+        />
+      ) : (
+        <>
+          <div className="section-title">
+            Версии файла{versions ? ` · ${versions.length}` : ""}
+            {rev && <span className="muted"> · по истории выбранной версии (другая ветка)</span>}
+          </div>
+          {error && <div className="error-text">{error}</div>}
+          {versions?.length === 0 && (
+            <div className="muted">Сохранённых версий ещё нет — сохраните файл, и здесь начнётся его история.</div>
+          )}
+          <div className="versions">
+            {versions?.map((v, i) =>
+              versionRow(
+                v,
+                versions.slice(i + 1).find((p) => p.kind !== "deleted"),
+                i === 0 && !!file && !removed && !rev,
+              ),
+            )}
+          </div>
+        </>
       )}
-      <div className="versions">
-        {versions?.map((v, i) => {
-          const id = v.snapshot.id;
-          const exists = v.kind !== "deleted" && !v.pruned;
-          const previous = versions.slice(i + 1).find((p) => p.kind !== "deleted");
-          const isHighlight = id === highlight;
-          return (
-            <div key={id} ref={isHighlight ? highlighted : undefined} className={`version ${isHighlight ? "highlight" : ""}`}>
-              <div className="version-main">
-                <div className="version-title">
-                  <KindBadge kind={v.kind} />
-                  <span className="version-message">{v.snapshot.message || "Без описания"}</span>
-                  {v.kind === "renamed" && v.from && (
-                    <span className="muted nowrap" title={`Было: ${v.from}`}>
-                      из «{splitPath(v.from).name}»
-                    </span>
-                  )}
-                  {v.kind !== "renamed" && v.path !== path && (
-                    <span className="muted nowrap" title={v.path}>
-                      как «{splitPath(v.path).name}»
-                    </span>
-                  )}
-                  {i === 0 && exists && !removed && !rev && <span className="label label-current">последняя</span>}
-                  {v.pruned && (
-                    <span className="muted" title="Содержимое удалено при очистке места">
-                      удалён при очистке
-                    </span>
-                  )}
-                  {branchOf(id) && (
-                    <span className="branch-chip" title="Ветка трека">
-                      <Icon name="branch" size={10} />
-                      {branchOf(id)}
-                    </span>
-                  )}
-                  <FileLabels labels={v.labels} />
-                </div>
-                <div className="commit-meta">
-                  <span>{formatDate(v.snapshot.createdAt)}</span>
-                  <span>{v.snapshot.author}</span>
-                  <code>{short(id)}</code>
-                  {v.size !== null && <span>{formatSize(v.size)}</span>}
-                </div>
-              </div>
-              {exists && (
-                <div className="row-actions">
-                  {comparable && versions.length > 1 && (
-                    <button
-                      className={`btn btn-small btn-ghost ${pick === v ? "picked" : ""}`}
-                      title={
-                        pick && pick !== v
-                          ? "Сравнить эту версию с выбранной"
-                          : "Выбрать версию, чтобы сравнить её с любой другой"
-                      }
-                      onClick={() => (pick && pick !== v ? compare(pick, v) : setPick(pick === v ? null : v))}
-                    >
-                      <Icon name="wave" size={14} /> {pick === v ? "Выбрана" : pick ? "С этой" : "Сравнить…"}
-                    </button>
-                  )}
-                  {previous && !previous.pruned && (
-                    <CompareButton
-                      a={{
-                        root,
-                        rev: previous.snapshot.id,
-                        path: previous.path,
-                        label: `Предыдущая · ${previous.snapshot.message}`,
-                      }}
-                      b={{ root, rev: id, path: v.path, label: `${short(id)} · ${v.snapshot.message}` }}
-                    />
-                  )}
-                  <PlayButton
-                    track={{ root, rev: id, path: v.path, label: `Версия ${short(id)} · ${v.snapshot.message}` }}
-                  />
-                  <button
-                    className="btn btn-small btn-ghost"
-                    title="Метки («демо», «мастер»…), темп и тональность"
-                    onClick={() => setEditing(v)}
-                  >
-                    <Icon name="label" size={14} /> Метки
-                  </button>
-                  <button
-                    className="btn btn-small btn-ghost"
-                    title="Вернуть файл в папку проекта в этом виде"
-                    onClick={() => actions.restore(path, id, v.path)}
-                  >
-                    <Icon name="restore" size={14} /> Вернуть
-                  </button>
-                  <button
-                    className="btn btn-small btn-ghost"
-                    title="Положить эту версию рядом, под другим именем"
-                    onClick={() => actions.saveCopy(path, id, short(id), v.path)}
-                  >
-                    <Icon name="copy" size={14} /> Копия
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
       {renaming && (
         <PromptDialog
           title={`Переименовать «${name}»`}
@@ -763,16 +789,40 @@ function BranchChip({ songs, path }: { songs: Songs; path: string }) {
   );
 }
 
+/** A version of a song as the list of a file's versions shows it. */
+function asFile(n: SongVersion): FileVersion {
+  const { id, parents, message, author, createdAt } = n.version;
+  return {
+    snapshot: { id, parents, message, author, createdAt },
+    kind: n.change,
+    path: n.path,
+    from: n.from,
+    size: n.size,
+    pruned: n.pruned,
+    labels: n.labels,
+  };
+}
+
 /**
- * A song's branches: which one is in the folder, the latest version of
- * each, putting another one into the folder, renaming, joining, a new one.
+ * A song's versions, as the diagram wires them: each branch (which one is
+ * in the folder, putting another one there, renaming, joining) with its
+ * versions, the latest on top, then the versions wired into no branch.
  */
-function SongBranches({ songs, laneOf }: { songs: Songs; laneOf: () => ReturnType<Songs["laneOf"]> }) {
-  const lane = laneOf();
+function SongVersions({
+  songs,
+  lane,
+  editable,
+  row,
+}: {
+  songs: Songs;
+  lane: Lane;
+  /** The song is in the folder: its branches can change. */
+  editable: boolean;
+  row: (n: SongVersion) => React.ReactNode;
+}) {
   const [menu, setMenu] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  if (!lane) return null;
   const headOf = (key: string) => lane.nodes.find((n): n is SongVersion => n.kind === "version" && n.key === key);
   const activeHead = headOf(lane.branches.find((b) => b.active)?.head ?? "");
   const track = (b: string, n: SongVersion) => ({
@@ -781,90 +831,120 @@ function SongBranches({ songs, laneOf }: { songs: Songs; laneOf: () => ReturnTyp
     path: n.path,
     label: `Ветка «${b}», версия ${n.number}`,
   });
+  /** A row's versions, the latest first. */
+  const versionsIn = (r: number) =>
+    lane.nodes.filter((n): n is SongVersion => n.kind === "version" && n.row === r).sort((a, b) => b.col - a.col);
+  const loose = lane.looseRow === null ? [] : versionsIn(lane.looseRow);
 
   return (
     <>
       <div className="section-title with-action">
-        Ветки трека · {lane.branches.length}
+        Ветки и версии · {lane.branches.length} {plural(lane.branches.length, "ветка", "ветки", "веток")},{" "}
+        {lane.versions} {plural(lane.versions, "версия", "версии", "версий")}
         <span className="grow" />
-        <button className="btn btn-small btn-ghost" onClick={() => setCreating(true)}>
-          <Icon name="plus" size={13} /> Новая ветка из файла…
-        </button>
+        {editable && (
+          <button className="btn btn-small btn-ghost" onClick={() => setCreating(true)}>
+            <Icon name="plus" size={13} /> Новая ветка из файла…
+          </button>
+        )}
       </div>
+      {lane.nodes.every((n) => n.kind !== "version") && (
+        <div className="muted">Сохранённых версий ещё нет — сохраните файл, и здесь начнётся его история.</div>
+      )}
       <div className="song-branches">
         {lane.branches.map((b) => {
           const head = headOf(b.head);
           const usable = head && head.change !== "deleted" && !head.pruned;
           const others = lane.branches.filter((o) => o.name !== b.name);
           return (
-            <div key={b.name} className={`song-branch ${b.active ? "active" : ""}`}>
-              <Icon name="branch" size={14} />
-              <b className="song-branch-name">{b.name}</b>
-              <span className="muted nowrap">
-                {b.versions} {plural(b.versions, "версия", "версии", "версий")}
-              </span>
-              {b.active && <span className="label label-current">в папке</span>}
-              <span className="grow" />
-              {usable && !b.active && activeHead && activeHead.change !== "deleted" && !activeHead.pruned && (
-                <CompareButton
-                  a={track(lane.branches.find((x) => x.active)!.name, activeHead)}
-                  b={track(b.name, head)}
-                />
-              )}
-              {usable && <PlayButton track={track(b.name, head)} />}
-              {usable && !b.active && (
-                <button
-                  className="btn btn-small"
-                  title="Положить последнюю версию этой ветки в папку проекта"
-                  onClick={() => songs.intoFolder(lane, head)}
-                >
-                  <Icon name="restore" size={13} /> В папку
-                </button>
-              )}
-              <div className="add-menu">
-                <button className="icon-btn" title="Ещё" onClick={() => setMenu(menu === b.name ? null : b.name)}>
-                  <Icon name="more" size={14} />
-                </button>
-                {menu === b.name && (
-                  <div className="popover" onMouseLeave={() => setMenu(null)}>
-                    <button
-                      className="popover-main"
-                      onClick={() => {
-                        setMenu(null);
-                        setRenaming(b.name);
-                      }}
-                    >
-                      <Icon name="edit" size={14} /> Переименовать…
+            <div key={b.name} className="song-branch-group">
+              <div className={`song-branch ${b.active ? "active" : ""}`}>
+                <Icon name="branch" size={14} />
+                <b className="song-branch-name">{b.name}</b>
+                <span className="muted nowrap">
+                  {b.versions} {plural(b.versions, "версия", "версии", "версий")}
+                </span>
+                {b.active && <span className="label label-current">в папке</span>}
+                <span className="grow" />
+                {usable && !b.active && activeHead && activeHead.change !== "deleted" && !activeHead.pruned && (
+                  <CompareButton
+                    a={track(lane.branches.find((x) => x.active)!.name, activeHead)}
+                    b={track(b.name, head)}
+                  />
+                )}
+                {usable && <PlayButton track={track(b.name, head)} />}
+                {usable && !b.active && editable && (
+                  <button
+                    className="btn btn-small"
+                    title="Положить последнюю версию этой ветки в папку проекта"
+                    onClick={() => songs.intoFolder(lane, head)}
+                  >
+                    <Icon name="restore" size={13} /> В папку
+                  </button>
+                )}
+                {editable && (
+                  <div className="add-menu">
+                    <button className="icon-btn" title="Ещё" onClick={() => setMenu(menu === b.name ? null : b.name)}>
+                      <Icon name="more" size={14} />
                     </button>
-                    {head && !b.active && usable && (
-                      <button
-                        className="popover-main"
-                        onClick={() => {
-                          setMenu(null);
-                          songs.addFile(lane, b.name);
-                        }}
-                      >
-                        <Icon name="download" size={14} /> Новая версия в ветку…
-                      </button>
+                    {menu === b.name && (
+                      <div className="popover" onMouseLeave={() => setMenu(null)}>
+                        <button
+                          className="popover-main"
+                          onClick={() => {
+                            setMenu(null);
+                            setRenaming(b.name);
+                          }}
+                        >
+                          <Icon name="edit" size={14} /> Переименовать…
+                        </button>
+                        {head && !b.active && usable && (
+                          <button
+                            className="popover-main"
+                            onClick={() => {
+                              setMenu(null);
+                              songs.addFile(lane, b.name);
+                            }}
+                          >
+                            <Icon name="download" size={14} /> Новая версия в ветку…
+                          </button>
+                        )}
+                        {others.map((o) => (
+                          <button
+                            key={o.name}
+                            className="popover-main"
+                            onClick={() => {
+                              setMenu(null);
+                              songs.joinBranch(lane, b.name, o.name);
+                            }}
+                          >
+                            <Icon name="merge" size={14} /> Перенести все версии в «{o.name}»
+                          </button>
+                        ))}
+                      </div>
                     )}
-                    {others.map((o) => (
-                      <button
-                        key={o.name}
-                        className="popover-main"
-                        onClick={() => {
-                          setMenu(null);
-                          songs.joinBranch(lane, b.name, o.name);
-                        }}
-                      >
-                        <Icon name="merge" size={14} /> Перенести все версии в «{o.name}»
-                      </button>
-                    ))}
                   </div>
                 )}
               </div>
+              <div className="versions">{versionsIn(b.row).map(row)}</div>
             </div>
           );
         })}
+        {loose.length > 0 && (
+          <div className="song-branch-group">
+            <div
+              className="song-branch loose"
+              title="Отсоединены от веток на схеме: проведите к ним провод, чтобы вернуть в ветку"
+            >
+              <Icon name="close" size={14} />
+              <b className="song-branch-name">Без ветки</b>
+              <span className="muted nowrap">
+                {loose.length} {plural(loose.length, "версия", "версии", "версий")}
+              </span>
+            </div>
+            <div className="versions">{loose.map(row)}</div>
+          </div>
+        )}
       </div>
       {renaming && (
         <PromptDialog

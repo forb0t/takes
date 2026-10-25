@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use takes_core::{Hash, Repo};
+use takes_core::{Hash, Repo, TakeFrom};
 use tauri::{AppHandle, Manager, State};
 
 use crate::dto::*;
@@ -428,24 +428,53 @@ pub async fn switch_branch(root: String, name: String) -> CmdResult<()> {
     blocking(move || Ok(open(&root)?.switch(&name)?)).await
 }
 
-/// Saves a file from outside as a version of a song's variant after version
-/// `parent`, beside the folder: the folder keeps what it has.
+/// What a take of a song is made of, as the app names it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeSource {
+    /// A file outside the project.
+    Outside(String),
+    /// A file of the project folder, as it is on disk.
+    Folder(String),
+    /// A file (called `path` there) of a saved version.
+    Version { rev: String, path: String },
+}
+
+/// Saves a file as a version of a song's variant after version `parent`,
+/// beside the folder: the folder keeps what it has.
 #[tauri::command]
 pub async fn save_take(
     root: String,
-    source: String,
+    source: TakeSource,
     path: String,
     parent: String,
     variant: String,
 ) -> CmdResult<String> {
     blocking(move || {
         let song = path.rsplit('/').next().unwrap_or(&path);
-        let file = Path::new(&source).file_name().map(|n| n.to_string_lossy());
-        let message = format!("«{song}», ветка «{variant}»: {}", file.unwrap_or_default());
-        let id = open(&root)?.save_take(Path::new(&source), &path, &parent, &message)?;
+        let (from, what) = match &source {
+            TakeSource::Outside(file) => (
+                TakeFrom::Outside(Path::new(file)),
+                Path::new(file)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            TakeSource::Folder(file) => (TakeFrom::Folder(file), format!("из «{}»", name_of(file))),
+            TakeSource::Version { rev, path: file } => (
+                TakeFrom::Version { rev, path: file },
+                format!("из «{}»", name_of(file)),
+            ),
+        };
+        let message = format!("«{song}», ветка «{variant}»: {what}");
+        let id = open(&root)?.save_take(from, &path, &parent, &message)?;
         Ok(id.to_hex())
     })
     .await
+}
+
+fn name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Brings a version of a song (called `from` there) into the folder as

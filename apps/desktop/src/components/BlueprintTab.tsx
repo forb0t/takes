@@ -1,9 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, errorText, type ChangeKind, type Overview, type RemovedFile } from "../api";
+import { api, errorText, type ChangeKind, type Overview, type RemovedFile, type TakeSource } from "../api";
 import {
+  BRANCH_PREFIX,
   LANE_PAD,
+  LOOSE_KEY,
   NEW_BRANCH_KEY,
   PIN_Y,
   SONG_KEY,
@@ -25,18 +27,19 @@ import {
   type Point,
   type Rect,
   type SongBranch,
+  type SongLinks,
   type SongVersion,
   type WorkNode,
 } from "../blueprint";
 import { CompareButton, PlayButton, usePlayer, type Track } from "../player";
 import { Empty, FileLabels, Icon, KindBadge, PromptDialog, useToast, type IconName } from "../ui";
 import { baseName, formatDate, plural, previewKind, short, splitPath } from "../util";
-import { shortId } from "../blueprint";
 import { FileDetail, type Drafts, type ProjectFile } from "./FilesTab";
 import { FileMetaDialog } from "./FileMetaDialog";
 import { SongBranchDialog } from "./SongBranchDialog";
 import { SETTLE_MS, type Songs } from "../songs";
 import { useFileActions } from "./useFileActions";
+import { connect, follows, moveOne, unplug } from "../wiring";
 
 /** Shared by every device of the project: where things lie, the tiles. */
 const LAYOUT_KEY = "canvas.layout";
@@ -83,10 +86,40 @@ const COLORS: [string, number][] = [
   ["Красный", 0],
 ];
 
+/** A wire on the diagram: from a node's output into a node's input. */
+interface Wire {
+  from: string;
+  to: string;
+  /** "chain": into a version, people rewire it; "song" (into a branch) and "work" (into the file on disk) stay. */
+  kind: "chain" | "song" | "work";
+  cls: string;
+}
+
+/** One end of a wire: a node's pin, or "+ файл" / "+ ветка" taking a wire as an output. */
+type WireEnd = { lane: string; key: string; side: "in" | "out" };
+
+/** A wire being pulled: a new one from a pin, or one there is by an end. */
+interface Pull {
+  /** The end that stays. */
+  fixed: WireEnd;
+  /** The wire there is, being moved. */
+  moving: Wire | null;
+  /** The loose end, on the canvas. */
+  at: Point;
+  /** The same, in the diagram's box: the hint goes there. */
+  screen: Point;
+  target: WireEnd | null;
+  /** What letting go there does; nothing when not `ok`. */
+  hint: string;
+  ok: boolean;
+}
+
+/** What plugging a wire in somewhere does. */
+type Plan = { ok: boolean; hint: string; run?: () => void };
+
 /** What is being dragged, and how far, in canvas pixels. */
 type Drag =
-  /** `band`: the band under the pointer (NEW_BRANCH: "+ ветка"); `home`: over its own lane. */
-  | { kind: "node"; lane: string; key: string; by: Point; band: string | null; home: boolean }
+  | { kind: "node"; lane: string; key: string; by: Point }
   | { kind: "lane"; lane: string; by: Point; tiles: string[] }
   | { kind: "tile"; id: string; by: Point; lanes: string[]; tiles: string[] }
   | { kind: "size"; id: string; by: Point };
@@ -130,6 +163,12 @@ interface Actions {
   addFile: (lane: Lane, branch: string, source?: string) => void;
   /** A new branch of the song, from a file (picked, or dropped as `source`). */
   newBranch: (lane: Lane, source?: string) => void;
+  /** Pulls a new wire from a pin; with Alt, unplugs the pin. */
+  pullPin: (e: React.PointerEvent, lane: Lane, key: string, side: "in" | "out") => void;
+  /** Pulls a wire there is by its nearer end. */
+  grabWire: (e: React.PointerEvent, lane: Lane, w: Wire) => void;
+  /** A double click on a wire: it breaks. */
+  breakWire: (lane: Lane, w: Wire) => void;
 }
 
 /** While dragging, the pointer passing over text must not select it. */
@@ -137,9 +176,6 @@ function noSelecting(on: boolean) {
   document.documentElement.classList.toggle("no-select", on);
   if (on) window.getSelection()?.removeAllRanges();
 }
-
-/** The dock's place for a branch not made yet. */
-const NEW_BRANCH = "";
 
 const snap = (v: number) => Math.round(v / GRID) * GRID;
 const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -263,8 +299,15 @@ export function BlueprintTab({
   const [tiles, setTiles] = useState<Tile[]>([]);
   /** A song's branch being renamed. */
   const [renamingBranch, setRenamingBranch] = useState<{ lane: Lane; name: string } | null>(null);
-  /** A version going to a new branch of its song, waiting for the name. */
-  const [naming, setNaming] = useState<{ lane: Lane; node: SongVersion } | null>(null);
+  /** A new branch of a song, waiting for its name. */
+  const [naming, setNaming] = useState<{
+    lane: Lane;
+    hint: string;
+    confirm: string;
+    make: (name: string) => unknown;
+  } | null>(null);
+  /** A wire being pulled. */
+  const [pull, setPull] = useState<Pull | null>(null);
   const [savedView] = useState(() => loadView(root));
   const [view, setView] = useState<View>(savedView ?? { x: 32, y: 32, zoom: 1 });
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -674,21 +717,9 @@ export function BlueprintTab({
   const finish = useRef<(d: Drag) => void>(() => {});
   finish.current = (d: Drag) => {
     if (d.kind === "node") {
+      // A node lies wherever it is put; only wires change what it is wired to.
       const p = basePlaced.find((x) => x.lane.path === d.lane);
       if (!p) return;
-      const n = p.lane.nodes.find((x) => nodeKey(x) === d.key);
-      // A version dropped on a band goes into that branch; "+ ветка" makes a new one.
-      if (n?.kind === "version" && d.band !== null) {
-        setFree(p.lane, d.key, null);
-        if (d.band === NEW_BRANCH) setNaming({ lane: p.lane, node: n });
-        else if (d.band !== n.branch) moveToBranch(p.lane, n, d.band);
-        return;
-      }
-      // Back over its lane it goes back in; anywhere else it lies on its own.
-      if (d.band !== null || d.home) {
-        setFree(p.lane, d.key, null);
-        return;
-      }
       const was = p.at.get(d.key)!;
       setFree(p.lane, d.key, [snap(p.origin.x + was.x + d.by.x), snap(p.origin.y + was.y + d.by.y)]);
     } else if (d.kind === "lane") {
@@ -742,23 +773,9 @@ export function BlueprintTab({
     window.addEventListener("pointercancel", onUp);
   }
 
-  /**
-   * Any node of a lane can be taken out of it and put anywhere; a version
-   * dropped on a band goes into that branch, and a node dropped back on
-   * its lane goes back in.
-   */
+  /** Any node of a lane can be taken out of it and put anywhere, with its wires. */
   function dragNode(e: React.PointerEvent, lane: Lane, key: string) {
-    const n = lane.nodes.find((x) => nodeKey(x) === key);
-    const sortable = n?.kind === "version" && n.change !== "deleted" && growing(lane);
-    beginDrag(e, (by, ev) => {
-      const under = document.elementFromPoint(ev.clientX, ev.clientY);
-      const band = under?.closest<HTMLElement>(`[data-band][data-lane="${CSS.escape(lane.path)}"]`);
-      const home = !!under?.closest(`.bp-lane[data-lane="${CSS.escape(lane.path)}"]`);
-      const name = band?.dataset.band ?? null;
-      // Only versions go to other branches; the rest just goes back in.
-      const target = name === null ? null : sortable || name === (n ? lane.branches[n.row]?.name : null) ? name : null;
-      return { kind: "node", lane: lane.path, key, by, band: target, home };
-    });
+    beginDrag(e, (by) => ({ kind: "node", lane: lane.path, key, by }));
   }
 
   /** The song with everything in its lane, and whatever lies on it. */
@@ -790,6 +807,247 @@ export function BlueprintTab({
     const free = { ...layout.free };
     for (const n of lane.names) delete free[n];
     saveLayout({ ...pinAll(), free });
+  }
+
+  // ---- wires --------------------------------------------------------------------
+
+  const songName = (lane: Lane) => splitPath(lane.path).name;
+  const versionName = (n: SongVersion) => (n.number ? `версия ${n.number}` : "удаление");
+
+  /** A pin's place on the canvas, as drawn now. */
+  function pinAt(lanePath: string, key: string, side: "in" | "out"): Point | null {
+    const p = placed.find((x) => x.lane.path === lanePath);
+    const at = p?.at.get(key);
+    if (!p || !at) return null;
+    return { x: p.origin.x + at.x + (side === "out" ? nodeSize(key).w - 6 : 6), y: p.origin.y + at.y + PIN_Y };
+  }
+
+  /** The node under the pointer a wire can go to; for an output also "+ файл" and "+ ветка". */
+  function endAt(x: number, y: number, side: "in" | "out"): WireEnd | null {
+    const el = document.elementFromPoint(x, y);
+    const lane = el?.closest<HTMLElement>(".bp-lane[data-lane]")?.dataset.lane;
+    if (!el || lane === undefined) return null;
+    if (side === "out") {
+      const add = el.closest<HTMLElement>("[data-add-to]")?.dataset.addTo;
+      if (add !== undefined) return { lane, key: addKey(add), side };
+      if (el.closest("[data-new-branch]")) return { lane, key: NEW_BRANCH_KEY, side };
+    }
+    const key = el.closest<HTMLElement>("[data-node]")?.dataset.node;
+    return key === undefined ? null : { lane, key, side };
+  }
+
+  /**
+   * What plugging the input of `into` into the output of `anchor` does. In
+   * one song it rewires the version (with what follows it); a file of
+   * another song is copied in as a new version there, and stays as it is.
+   */
+  function planWire(anchor: WireEnd, into: WireEnd, moving: Wire | null): Plan {
+    const la = lanes?.find((l) => l.path === anchor.lane);
+    const ln = lanes?.find((l) => l.path === into.lane);
+    if (!la || !ln) return { ok: false, hint: "" };
+    const n = ln.nodes.find((x) => nodeKey(x) === into.key);
+    if (!n) {
+      return {
+        ok: false,
+        hint: into.key.startsWith(BRANCH_PREFIX) ? "Ветка всегда идёт от своей песни" : "Сюда провод не подключить",
+      };
+    }
+    // After a version, first in a branch, last in a branch, or in a new one (null).
+    let after: string | null = null;
+    let branch = "";
+    let where = "в новую ветку…";
+    if (anchor.key === LOOSE_KEY) {
+      return { ok: false, hint: "Здесь версии без ветки: подключите провод к ветке или к версии" };
+    } else if (anchor.key.startsWith("+:")) {
+      branch = anchor.key.slice(2);
+      after = la.branches.find((b) => b.name === branch)?.head || branchKey(branch);
+      where = `в конец ветки «${branch}»`;
+    } else if (anchor.key.startsWith(BRANCH_PREFIX)) {
+      branch = anchor.key.slice(BRANCH_PREFIX.length);
+      after = anchor.key;
+      where = `первой в ветку «${branch}»`;
+    } else if (anchor.key !== SONG_KEY && anchor.key !== NEW_BRANCH_KEY) {
+      const v = la.nodes.find((x) => nodeKey(x) === anchor.key);
+      if (v?.kind !== "version")
+        return { ok: false, hint: "От «Сейчас в папке» провода нет: сначала сохраните версию" };
+      after = v.key;
+      branch = v.branch;
+      where = v.branch ? `в ветку «${v.branch}» после: ${versionName(v)}` : `после: ${versionName(v)}, без ветки`;
+    }
+
+    if (la === ln) {
+      if (n.kind === "work") return { ok: false, hint: "«Сейчас в папке» всегда идёт от версии, которая в папке" };
+      const label = n.number ? `Версия ${n.number}` : "Удаление";
+      // A wire moved off this version leaves it unplugged.
+      const base = moving && moving.to !== n.key ? { ...la, links: unplug(la, moving.to) } : la;
+      if (after === null) {
+        return {
+          ok: true,
+          hint: `${label} — в новую ветку…`,
+          run: () =>
+            setNaming({
+              lane: la,
+              hint: `${label} «${songName(la)}» и то, что идёт за ней, уйдут в новую ветку. Файлы не меняются.`,
+              confirm: "Перенести",
+              make: (name) => {
+                const links = connect(base, branchKey(name), n.key);
+                if (links) rewire(la, links, n.key);
+              },
+            }),
+        };
+      }
+      if (after === n.key) return { ok: false, hint: "Версию не подключить к самой себе" };
+      if (base === la && follows(la, after, n.key)) return { ok: false, hint: "Уже подключена здесь" };
+      const links = connect(base, after, n.key);
+      if (!links) return { ok: false, hint: "Получится круг: та версия идёт после этой" };
+      return { ok: true, hint: `${label} ${where}`, run: () => rewire(la, links, n.key) };
+    }
+
+    if (!growing(la)) return { ok: false, hint: `«${songName(la)}» нет в папке: в неё не добавить версию` };
+    let source: TakeSource;
+    let what: string;
+    if (n.kind === "work") {
+      if (n.status === "deleted") return { ok: false, hint: "Этого файла нет на диске" };
+      source = { folder: n.path };
+      what = songName(ln);
+    } else {
+      if (n.change === "deleted" || n.pruned) return { ok: false, hint: "У этой версии нет файла" };
+      source = { version: { rev: n.version.id, path: n.path } };
+      what = `${songName(ln)}, ${versionName(n)}`;
+    }
+    const hint = `Копия «${what}» → «${songName(la)}», ${where}`;
+    if (after === null) {
+      return {
+        ok: true,
+        hint,
+        run: () =>
+          setNaming({
+            lane: la,
+            hint: `Копия «${what}» станет первой версией новой ветки «${songName(la)}». «${songName(ln)}» не меняется.`,
+            confirm: "Создать ветку",
+            make: (name) => songs.copyInto(la, null, name, source, what),
+          }),
+      };
+    }
+    return { ok: true, hint, run: () => songs.copyInto(la, after, branch, source, what) };
+  }
+
+  /** The song wired anew; Ctrl+Z brings back how it was, and `moved` shines for a moment. */
+  function rewire(lane: Lane, links: SongLinks, moved?: string) {
+    const before = lane.links;
+    remember(() => songs.relink(lane, before));
+    songs.relink(lane, links);
+    if (moved) {
+      setFlash(moved);
+      setTimeout(() => setFlash((f) => (f === moved ? null : f)), 1600);
+    }
+  }
+
+  /** Unplugs version `key`: it and what follows it are wired into no branch. */
+  function cut(lane: Lane, key: string) {
+    const n = lane.nodes.find((x): x is SongVersion => x.kind === "version" && x.key === key);
+    if (!n) return;
+    rewire(lane, unplug(lane, key), key);
+    toast(`${n.number ? `Версия ${n.number}` : "Удаление"} «${songName(lane)}» без ветки · Ctrl+Z — вернуть`, "info");
+  }
+
+  function breakWire(lane: Lane, w: Wire) {
+    if (w.kind === "song")
+      toast("Ветка всегда идёт от своей песни. Чтобы разобрать ветку, оборвите провод к её первой версии", "info");
+    else if (w.kind === "work") toast("«Сейчас в папке» всегда идёт от версии, которая лежит в папке", "info");
+    else cut(lane, w.to);
+  }
+
+  /** Read when the pointer moves, so a long pull always works on what is drawn now. */
+  const wiresNow = useRef({ endAt, planWire, toCanvas, cut });
+  wiresNow.current = { endAt, planWire, toCanvas, cut };
+
+  /** Pulls a wire from `fixed`; let go over a node, it plugs in there. Esc lets go of it. */
+  function startPull(e: React.PointerEvent, fixed: WireEnd, moving: Wire | null) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    suppressClick.current = false;
+    const start = { x: e.clientX, y: e.clientY };
+    const want = fixed.side === "out" ? "in" : "out";
+    let last: Pull | null = null;
+    const plan = (target: WireEnd | null): Plan => {
+      const now = wiresNow.current;
+      if (!target) return moving ? { ok: true, hint: "Отпустите — провод оборвётся" } : { ok: false, hint: "" };
+      return fixed.side === "out" ? now.planWire(fixed, target, moving) : now.planWire(target, fixed, moving);
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!last && Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) <= 4) return;
+      if (!last) noSelecting(true);
+      suppressClick.current = true;
+      const now = wiresNow.current;
+      const target = now.endAt(ev.clientX, ev.clientY, want);
+      const { ok, hint } = plan(target);
+      const r = box?.getBoundingClientRect() ?? { left: 0, top: 0 };
+      last = {
+        fixed,
+        moving,
+        at: now.toCanvas(ev.clientX, ev.clientY),
+        screen: { x: ev.clientX - r.left, y: ev.clientY - r.top },
+        target,
+        hint,
+        ok,
+      };
+      setPull(last);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", stop);
+      window.removeEventListener("keydown", onKey, true);
+      noSelecting(false);
+      setPull(null);
+    };
+    const onUp = () => {
+      stop();
+      if (!last) return;
+      const lane = lanes?.find((l) => l.path === fixed.lane);
+      if (!last.target) {
+        if (moving && lane) wiresNow.current.cut(lane, moving.to);
+        return;
+      }
+      const todo = plan(last.target);
+      if (todo.ok) todo.run?.();
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.stopPropagation();
+      last = null;
+      stop();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", stop);
+    window.addEventListener("keydown", onKey, true);
+  }
+
+  /** A new wire from a pin; Alt + click unplugs it, as in a blueprint. */
+  function pullPin(e: React.PointerEvent, lane: Lane, key: string, side: "in" | "out") {
+    if (e.button === 0 && e.altKey) {
+      e.stopPropagation();
+      const into = side === "in" ? key : wiresOf(lane).find((w) => w.kind === "chain" && w.from === key)?.to;
+      if (into) cut(lane, into);
+      return;
+    }
+    startPull(e, { lane: lane.path, key, side }, null);
+  }
+
+  /** A wire there is, by the end nearer the pointer; the other end stays. */
+  function grabWire(e: React.PointerEvent, lane: Lane, w: Wire) {
+    const at = toCanvas(e.clientX, e.clientY);
+    const a = pinAt(lane.path, w.from, "out");
+    const b = pinAt(lane.path, w.to, "in");
+    if (!a || !b) return;
+    const nearIn = Math.hypot(at.x - b.x, at.y - b.y) < Math.hypot(at.x - a.x, at.y - a.y);
+    startPull(
+      e,
+      nearIn ? { lane: lane.path, key: w.from, side: "out" } : { lane: lane.path, key: w.to, side: "in" },
+      w,
+    );
   }
 
   function dragTile(e: React.PointerEvent, tile: Tile) {
@@ -916,15 +1174,11 @@ export function BlueprintTab({
   });
   const nowTrack = (path: string): Track => ({ root, rev: null, path, label: "Сейчас на диске (не сохранено)" });
 
-  /** A version goes to another branch of its song: only where it is drawn changes. */
+  /** Only this version to another branch of its song; the versions after it close up. Files do not change. */
   function moveToBranch(lane: Lane, n: SongVersion, to: string) {
     if (n.branch === to) return;
-    const before = { ...lane.branchOf };
-    remember(() => songs.sortInto(lane, before));
-    songs.sortInto(lane, { [shortId(n.version.id)]: to });
-    setFlash(n.key);
-    setTimeout(() => setFlash((f) => (f === n.key ? null : f)), 1600);
-    toast(`Версия ${n.number ?? ""} «${splitPath(lane.path).name}» теперь в ветке «${to}»`, "ok");
+    rewire(lane, moveOne(lane, n, to), n.key);
+    toast(`${n.number ? `Версия ${n.number}` : "Удаление"} «${songName(lane)}» теперь в ветке «${to}»`, "ok");
   }
 
   async function quickSave(w: WorkNode) {
@@ -1010,12 +1264,21 @@ export function BlueprintTab({
         run: () => songs.addFile(lane, n.branch),
       });
     }
-    if (n.change !== "deleted") {
-      for (const b of lane.branches.filter((b) => b.name !== n.branch)) {
-        items.push({ label: `Перенести в ветку «${b.name}»`, icon: "branch", run: () => moveToBranch(lane, n, b.name) });
-      }
-      items.push({ label: "Перенести в новую ветку…", icon: "branch", run: () => setNaming({ lane, node: n }) });
+    for (const b of lane.branches.filter((b) => b.name !== n.branch)) {
+      items.push({ label: `Перенести в ветку «${b.name}»`, icon: "branch", run: () => moveToBranch(lane, n, b.name) });
     }
+    items.push({
+      label: "Перенести в новую ветку…",
+      icon: "branch",
+      run: () =>
+        setNaming({
+          lane,
+          hint: `Только ${versionName(n)} уйдёт ${n.branch ? `из ветки «${n.branch}» ` : ""}в новую ветку. Файлы не меняются.`,
+          confirm: "Перенести",
+          make: (name) => moveToBranch(lane, n, name),
+        }),
+    });
+    if (n.branch) items.push({ label: "Оборвать провод (без ветки)", icon: "close", run: () => cut(lane, n.key) });
     if (usable) {
       items.push({
         label: "Новая ветка от этой версии…",
@@ -1089,8 +1352,8 @@ export function BlueprintTab({
         label: `Перенести все версии в «${o.name}»`,
         icon: "merge",
         run: () => {
-          const before = { ...lane.branchOf };
-          remember(() => songs.sortInto(lane, before));
+          const before = lane.links;
+          remember(() => songs.relink(lane, before));
           songs.joinBranch(lane, b.name, o.name);
         },
       });
@@ -1179,6 +1442,9 @@ export function BlueprintTab({
     addFile: songs.addFile,
     newBranch: (lane, source) =>
       setBranching({ lane, parent: "HEAD", start: "версии, которая сейчас в папке", source }),
+    pullPin,
+    grabWire,
+    breakWire,
   };
 
   // ---- drawing ------------------------------------------------------------------
@@ -1295,8 +1561,11 @@ export function BlueprintTab({
               "Тащите полотно мышью (или средней кнопкой)\n" +
               "Колесо — прокрутка, Shift + колесо — вбок\n" +
               "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё, Ctrl+F — найти, Ctrl+Z — отменить\n" +
-              "Любой узел можно вытащить из дорожки и поставить куда угодно; брошенный обратно на дорожку, он вернётся\n" +
-              "Версию, брошенную на полосу ветки, — в эту ветку; на «＋ ветка» — в новую\n" +
+              "Узел ставится куда угодно — ветки от этого не меняются; «Вернуть в дорожку» в его меню\n" +
+              "Провода решают, что в какой ветке: тащите провод за конец к другому узлу, двойной щелчок — оборвать\n" +
+              "От пина ▷ можно провести новый провод; Alt + щелчок по пину — оборвать. Esc — бросить провод\n" +
+              "Версия идёт со всем, что за ней на проводе; оборванные — в ряду «Без ветки»\n" +
+              "Провод к версии или файлу другой песни — их копия станет версией этой песни\n" +
               "Песню целиком двигает заголовок её рамки, вместе с заметками на ней\n" +
               "Правая кнопка — действия, на пустом месте — новые тайлы"
             }
@@ -1318,7 +1587,7 @@ export function BlueprintTab({
 
         <div
           ref={setBox}
-          className={`bp ${panning ? "panning" : ""} ${drag ? "dragging" : ""}`}
+          className={`bp ${panning ? "panning" : ""} ${drag ? "dragging" : ""} ${pull ? "wiring" : ""}`}
           style={gridStyle}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -1365,7 +1634,10 @@ export function BlueprintTab({
                 tagsOf={tagsOf}
                 selectedKey={selected?.path === p.lane.path ? (selected.key ?? "") : null}
                 dim={!!matched && !matched.has(p.lane.path)}
-                target={drag?.kind === "node" && drag.lane === p.lane.path ? drag.band : null}
+                pullAt={pull?.target?.lane === p.lane.path ? `${pull.ok ? "ok" : "bad"}:${pull.target.key}` : null}
+                pullWire={
+                  pull?.moving && pull.fixed.lane === p.lane.path ? `${pull.moving.from}>${pull.moving.to}` : null
+                }
                 flash={flash}
                 dragging={
                   drag?.kind === "node" && drag.lane === p.lane.path
@@ -1389,7 +1661,16 @@ export function BlueprintTab({
                   act={act}
                 />
               ))}
+            {pull && <LiveWire pull={pull} pinAt={pinAt} />}
           </div>
+          {pull?.hint && (
+            <div
+              className={`bp-pull-hint ${pull.ok ? "" : "bad"}`}
+              style={{ left: pull.screen.x + 18, top: pull.screen.y + 14 }}
+            >
+              {pull.hint}
+            </div>
+          )}
 
           {empty && (
             <div className="bp-empty">
@@ -1513,8 +1794,8 @@ export function BlueprintTab({
             if (to !== name && lane.branches.some((b) => b.name.toLowerCase() === to.toLowerCase())) {
               throw new Error(`У трека уже есть ветка «${to}»`);
             }
-            const before = { ...lane.branchOf };
-            remember(() => songs.sortInto(lane, before));
+            const before = lane.links;
+            remember(() => songs.relink(lane, before));
             songs.renameBranch(lane, name, to);
           }}
           onClose={() => setRenamingBranch(null)}
@@ -1522,16 +1803,16 @@ export function BlueprintTab({
       )}
       {naming && (
         <PromptDialog
-          title={`Новая ветка «${splitPath(naming.lane.path).name}»`}
+          title={`Новая ветка «${songName(naming.lane)}»`}
           label="Название ветки"
           placeholder="Например: акустика, ремикс"
-          confirm="Перенести"
-          hint={`Версия ${naming.node.number} уйдёт из ветки «${naming.node.branch}» в новую. Файлы не меняются.`}
+          confirm={naming.confirm}
+          hint={naming.hint}
           onSubmit={async (name) => {
             if (naming.lane.branches.some((b) => b.name.toLowerCase() === name.toLowerCase())) {
               throw new Error(`У трека уже есть ветка «${name}»`);
             }
-            moveToBranch(naming.lane, naming.node, name);
+            await naming.make(name);
           }}
           onClose={() => setNaming(null)}
         />
@@ -1561,17 +1842,68 @@ export function BlueprintTab({
   );
 }
 
-/** An execution pin, filled when a wire is attached. */
-function ExecPin({ side, on }: { side: "in" | "out"; on: boolean }) {
+/** The lane's wires: the song to each branch, the versions on each wire, the file on disk from its version. */
+function wiresOf(lane: Lane): Wire[] {
+  const byKey = new Map(lane.nodes.map((n) => [n.key, n]));
+  const wires: Wire[] = lane.branches.map((b) => ({
+    from: SONG_KEY,
+    to: branchKey(b.name),
+    kind: "song",
+    cls: b.active ? "" : "elsewhere",
+  }));
+  for (const n of lane.nodes) {
+    const row = lane.branches[n.row];
+    if (n.kind === "work") {
+      const from = n.parent && byKey.has(n.parent) ? n.parent : row ? branchKey(row.name) : null;
+      if (from) wires.push({ from, to: nodeKey(n), kind: "work", cls: "work" });
+      continue;
+    }
+    const from = n.links[0] ?? (n.branch ? branchKey(n.branch) : null);
+    if (from)
+      wires.push({
+        from,
+        to: n.key,
+        kind: "chain",
+        cls: !n.branch ? "loose" : row?.active ? "" : "elsewhere",
+      });
+  }
+  return wires;
+}
+
+/** An execution pin, filled when a wire is attached; a wire can be pulled from it. */
+function ExecPin({ side, on, onPull }: { side: "in" | "out"; on: boolean; onPull?: (e: React.PointerEvent) => void }) {
   return (
     <svg
-      className={`bp-pin bp-pin-${side} ${on ? "on" : ""}`}
-      width="13"
-      height="15"
-      viewBox="0 0 13 15"
-      style={{ top: PIN_Y - 7.5 }}
+      className={`bp-pin bp-pin-${side} ${on ? "on" : ""} ${onPull ? "pullable" : ""}`}
+      width="21"
+      height="23"
+      viewBox="-4 -4 21 23"
+      style={{ top: PIN_Y - 11.5 }}
+      data-pin={side}
+      onPointerDown={onPull}
     >
+      {onPull && <title>Тащите, чтобы провести провод; Alt + щелчок — оборвать</title>}
+      <rect className="bp-pin-hit" x="-4" y="-4" width="21" height="23" />
       <path d="M1.5 1.5h5.5l4.5 6-4.5 6h-5.5z" />
+    </svg>
+  );
+}
+
+/** The wire being pulled: from the pin that stays to the pointer, or to the pin under it. */
+function LiveWire({
+  pull,
+  pinAt,
+}: {
+  pull: Pull;
+  pinAt: (lane: string, key: string, side: "in" | "out") => Point | null;
+}) {
+  const fixed = pinAt(pull.fixed.lane, pull.fixed.key, pull.fixed.side);
+  if (!fixed) return null;
+  const end = (pull.target && pinAt(pull.target.lane, pull.target.key, pull.target.side)) || pull.at;
+  const d = pull.fixed.side === "out" ? wire(fixed.x, fixed.y, end.x, end.y) : wire(end.x, end.y, fixed.x, fixed.y);
+  return (
+    <svg className="bp-live" width="1" height="1">
+      <path d={d} className={`bp-wire live ${pull.target && !pull.ok ? "bad" : ""}`} />
     </svg>
   );
 }
@@ -1591,7 +1923,8 @@ const LaneView = memo(function LaneView({
   tagsOf,
   selectedKey,
   dragging,
-  target,
+  pullAt,
+  pullWire,
   flash,
   dim,
   act,
@@ -1606,8 +1939,10 @@ const LaneView = memo(function LaneView({
   selectedKey: string | null;
   /** The node being dragged; "" for the whole lane. */
   dragging: string | null;
-  /** The band a dragged version would go to (NEW_BRANCH: a new branch). */
-  target: string | null;
+  /** Where a pulled wire would go in this lane: "ok:<key>" or "bad:<key>". */
+  pullAt: string | null;
+  /** The wire being moved, hidden meanwhile: "<from>><to>". */
+  pullWire: string | null;
   /** A version just moved, shown for a moment. */
   flash: string | null;
   /** Not what the search is looking for. */
@@ -1667,23 +2002,12 @@ const LaneView = memo(function LaneView({
     return { left: p.x, top: p.y, width: nodeSize(key).w, height: nodeSize(key).h };
   };
 
-  // Wires: the song to each branch, each branch along its versions, the
-  // branch in the folder on to the file on disk.
-  const wires: { from: string; to: string; cls: string }[] = lane.branches.map((b) => ({
-    from: SONG_KEY,
-    to: branchKey(b.name),
-    cls: b.active ? "" : "elsewhere",
-  }));
-  for (const n of lane.nodes) {
-    const row = lane.branches[n.row];
-    const before = n.kind === "version" ? n.links[0] : n.parent && byKey.get(n.parent)?.row === n.row ? n.parent : null;
-    wires.push({
-      from: before && byKey.has(before) ? nodeKey(byKey.get(before)!) : branchKey(row.name),
-      to: nodeKey(n),
-      cls: n.kind === "work" ? "work" : row.active ? "" : "elsewhere",
-    });
-  }
+  const wires = wiresOf(lane);
   const fed = new Set(wires.map((w) => w.from));
+  /** How a node shows where a pulled wire would go. */
+  const pullCls = (key: string) => (pullAt === `ok:${key}` ? "pull-ok" : pullAt === `bad:${key}` ? "pull-bad" : "");
+  const pin = (key: string, side: "in" | "out") => (e: React.PointerEvent) => act.current.pullPin(e, lane, key, side);
+  const loose = lane.nodes.filter((n) => n.kind === "version" && n.row === lane.looseRow).length;
 
   return (
     <div
@@ -1694,7 +2018,6 @@ const LaneView = memo(function LaneView({
         `lane-${lane.status}`,
         selectedKey !== null ? "selected" : "",
         dragging === "" ? "lifted" : "",
-        dragging ? "dragging-in" : "",
         dim ? "dim" : "",
       ].join(" ")}
       style={{
@@ -1718,32 +2041,55 @@ const LaneView = memo(function LaneView({
         </span>
       </div>
 
-      {lane.branches.map((b) => {
+      {[
+        ...lane.branches.map((b) => ({ key: b.name, row: b.row, cls: b.active ? "active" : "" })),
+        ...(lane.looseRow !== null ? [{ key: LOOSE_KEY, row: lane.looseRow, cls: "loose" }] : []),
+      ].map((b) => {
         const band = bandRect(b.row);
         const left = band.x - frame.x;
         return (
           <div
-            key={b.name}
-            data-band={b.name}
-            data-lane={lane.path}
-            className={`bp-band ${b.active ? "active" : ""} ${target === b.name ? "target" : ""}`}
-            style={{ left, top: band.y - frame.y, width: frame.w - left - LANE_PAD / 2, height: band.h }}
-          >
-            {target === b.name && <span className="bp-band-hint">в ветку «{b.name}»</span>}
-          </div>
+            key={b.key}
+            className={`bp-band ${b.cls}`}
+            style={{
+              left,
+              top: band.y - frame.y,
+              width: frame.w - left - LANE_PAD / 2,
+              height: band.h,
+            }}
+          />
         );
       })}
 
       <svg className="bp-wires" width={frame.w} height={frame.h}>
         {wires.map((w) => {
+          const id = `${w.from}>${w.to}`;
+          if (id === pullWire) return null;
           const a = pinOut(w.from);
           const b = pinIn(w.to);
-          return <path key={`${w.from}>${w.to}`} d={wire(a.x, a.y, b.x, b.y)} className={`bp-wire ${w.cls}`} />;
+          const d = wire(a.x, a.y, b.x, b.y);
+          return (
+            <g key={id} className={`bp-wire-g ${w.kind}`}>
+              <path
+                d={d}
+                className="bp-wire-hit"
+                onPointerDown={w.kind === "chain" ? (e) => act.current.grabWire(e, lane, w) : undefined}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  act.current.breakWire(lane, w);
+                }}
+              >
+                {w.kind === "chain" && <title>Тащите за провод, чтобы переподключить; двойной щелчок — оборвать</title>}
+              </path>
+              <path d={d} className={`bp-wire ${w.cls}`} />
+            </g>
+          );
         })}
       </svg>
 
       <div
-        className={`bp-node bp-song ${muted ? "muted" : ""} ${selectedKey === "" ? "selected" : ""} ${dragging === SONG_KEY ? "dragging" : ""}`}
+        className={`bp-node bp-song ${muted ? "muted" : ""} ${selectedKey === "" ? "selected" : ""} ${dragging === SONG_KEY ? "dragging" : ""} ${pullCls(SONG_KEY)}`}
+        data-node={SONG_KEY}
         style={box(SONG_KEY)}
         onPointerDown={(e) => act.current.dragNode(e, lane, SONG_KEY)}
         onClick={() => act.current.select(lane.path, null)}
@@ -1777,7 +2123,7 @@ const LaneView = memo(function LaneView({
           </div>
           <div className="bp-row">{file && <FileLabels labels={file.labels} />}</div>
         </div>
-        <ExecPin side="out" on={lane.branches.length > 0} />
+        <ExecPin side="out" on={lane.branches.length > 0} onPull={pin(SONG_KEY, "out")} />
       </div>
 
       {lane.branches.map((b) => {
@@ -1786,7 +2132,8 @@ const LaneView = memo(function LaneView({
         return (
           <div
             key={branchKey(b.name)}
-            className={`bp-node bp-branch-node ${b.active ? "active" : ""} ${dragging === branchKey(b.name) ? "dragging" : ""}`}
+            className={`bp-node bp-branch-node ${b.active ? "active" : ""} ${dragging === branchKey(b.name) ? "dragging" : ""} ${pullCls(branchKey(b.name))}`}
+            data-node={branchKey(b.name)}
             style={box(branchKey(b.name))}
             onPointerDown={(e) => act.current.dragNode(e, lane, branchKey(b.name))}
             onClick={() => act.current.select(lane.path, null)}
@@ -1808,7 +2155,7 @@ const LaneView = memo(function LaneView({
               </button>
             </div>
             <ExecPin side="in" on />
-            <ExecPin side="out" on={fed.has(branchKey(b.name))} />
+            <ExecPin side="out" on={fed.has(branchKey(b.name))} onPull={pin(branchKey(b.name), "out")} />
             <div className="bp-rows">
               <div className="bp-row">
                 <span className="bp-text">
@@ -1846,12 +2193,12 @@ const LaneView = memo(function LaneView({
         lane.branches.map((b) => (
           <button
             key={addKey(b.name)}
-            className="bp-add"
+            className={`bp-add ${pullCls(addKey(b.name))}`}
             data-file-drop
             data-add-to={b.name}
             style={box(addKey(b.name))}
             onClick={() => act.current.addFile(lane, b.name)}
-            title={`Новая версия в ветку «${b.name}»: выберите файл или бросьте его сюда`}
+            title={`Новая версия в ветку «${b.name}»: выберите файл, бросьте его сюда или проведите сюда провод от версии`}
           >
             <Icon name="plus" size={16} />
             <span>файл</span>
@@ -1860,17 +2207,40 @@ const LaneView = memo(function LaneView({
 
       {!muted && (
         <button
-          className={`bp-newbranch ${target === NEW_BRANCH ? "target" : ""}`}
+          className={`bp-newbranch ${pullCls(NEW_BRANCH_KEY)}`}
           data-file-drop
           data-new-branch
-          data-band={NEW_BRANCH}
-          data-lane={lane.path}
           style={box(NEW_BRANCH_KEY)}
           onClick={() => act.current.newBranch(lane)}
-          title="Новая ветка трека из файла; можно бросить сюда файл или перетащить версию"
+          title="Новая ветка трека из файла; можно бросить сюда файл или провести сюда провод от версии"
         >
           <Icon name="plus" size={14} /> ветка
         </button>
+      )}
+
+      {lane.looseRow !== null && (
+        <div
+          className={`bp-node bp-loose-node ${dragging === LOOSE_KEY ? "dragging" : ""} ${pullCls(LOOSE_KEY)}`}
+          data-node={LOOSE_KEY}
+          style={box(LOOSE_KEY)}
+          onPointerDown={(e) => act.current.dragNode(e, lane, LOOSE_KEY)}
+          title="Версии, отсоединённые от веток. Проведите провод от ветки или версии к такой версии — и она снова в ветке"
+        >
+          <div className="bp-node-head">
+            <Icon name="close" size={12} />
+            <span className="bp-title">Без ветки</span>
+          </div>
+          <div className="bp-rows">
+            <div className="bp-row">
+              <span className="bp-text">
+                {loose} {plural(loose, "версия", "версии", "версий")}
+              </span>
+            </div>
+            <div className="bp-row bp-meta">
+              <span className="bp-text">подключите проводом к ветке</span>
+            </div>
+          </div>
+        </div>
       )}
 
       {lane.nodes.map((n) => {
@@ -1884,7 +2254,8 @@ const LaneView = memo(function LaneView({
               key={n.key}
               style={style}
               onPointerDown={(e) => act.current.dragNode(e, lane, key)}
-              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""} ${dragging === key ? "dragging" : ""}`}
+              data-node={key}
+              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""} ${dragging === key ? "dragging" : ""} ${pullCls(key)}`}
               onClick={() => act.current.select(lane.path, n.key, true)}
               onContextMenu={(e) => act.current.workMenu(e, lane, n)}
               title="Файл в папке сейчас: щёлкните, чтобы описать и сохранить"
@@ -1894,7 +2265,7 @@ const LaneView = memo(function LaneView({
                 <span className="bp-title">Сейчас в папке</span>
                 <span className="bp-state">{WORK_WORD[n.status]}</span>
               </div>
-              <ExecPin side="in" on />
+              <ExecPin side="in" on onPull={pin(key, "in")} />
               <div className="bp-rows">
                 <div className="bp-row bp-msg">
                   <span className="bp-text">
@@ -1938,19 +2309,21 @@ const LaneView = memo(function LaneView({
             key={n.key}
             style={style}
             onPointerDown={(e) => act.current.dragNode(e, lane, key)}
+            data-node={key}
             className={[
               "bp-node bp-version",
               `change-${n.change}`,
-              lane.branches[n.row]?.active ? "" : "elsewhere",
+              !n.branch ? "loose" : lane.branches[n.row]?.active ? "" : "elsewhere",
               merge ? "merge" : "",
               isSelected ? "selected" : "",
               dragging === key ? "dragging" : "",
               flash === n.key ? "flash" : "",
+              pullCls(key),
             ].join(" ")}
             onClick={() => act.current.select(lane.path, n.key)}
             onContextMenu={(e) => act.current.versionMenu(e, lane, n)}
             title={`${v.message || "без описания"}\n${formatDate(v.createdAt)} · ${v.author} · ${short(v.id)}${
-              muted ? "" : `\nПеретащите на полосу другой ветки, чтобы перенести`
+              n.branch ? "" : "\nБез ветки: проведите к ней провод от ветки или версии"
             }`}
           >
             <div className="bp-node-head">
@@ -1967,8 +2340,8 @@ const LaneView = memo(function LaneView({
                 </span>
               )}
             </div>
-            <ExecPin side="in" on />
-            <ExecPin side="out" on={fed.has(n.key)} />
+            <ExecPin side="in" on={n.links.length > 0 || !!n.branch} onPull={pin(key, "in")} />
+            <ExecPin side="out" on={fed.has(n.key)} onPull={pin(key, "out")} />
             <div className="bp-rows">
               <div className="bp-row bp-msg">
                 <span className="bp-text">{v.message || <i>без описания</i>}</span>

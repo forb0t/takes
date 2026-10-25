@@ -2,7 +2,7 @@ use std::fs;
 
 use takes_core::{
     Change, ChangeKind, Error, FileMeta, MergeKind, MergeOutcome, Repo, Resolution, Stats,
-    TAKE_PREFIX, hash_file,
+    TAKE_PREFIX, TakeFrom, hash_file,
 };
 use tempfile::TempDir;
 
@@ -1060,7 +1060,9 @@ fn a_take_is_saved_beside_the_folder_and_brought_into_it() {
     fs::write(&remix, "remix take").unwrap();
 
     // Saved off the folder's line: the folder and its history stay.
-    let take = repo.save_take(&remix, "song.wav", "HEAD", "remix").unwrap();
+    let take = repo
+        .save_take(TakeFrom::Outside(&remix), "song.wav", "HEAD", "remix")
+        .unwrap();
     assert_eq!(repo.resolve("HEAD").unwrap(), main);
     assert_eq!(read(&repo, "song.wav"), b"album take");
     assert!(changes(&repo).is_empty());
@@ -1079,11 +1081,21 @@ fn a_take_is_saved_beside_the_folder_and_brought_into_it() {
     assert_eq!(refs.len(), 1);
     fs::write(&remix, "remix take 2").unwrap();
     let next = repo
-        .save_take(&remix, "song.wav", &take.to_hex(), "remix 2")
+        .save_take(
+            TakeFrom::Outside(&remix),
+            "song.wav",
+            &take.to_hex(),
+            "remix 2",
+        )
         .unwrap();
     assert_eq!(repo.resolve(&refs[0].name).unwrap(), next);
     assert!(matches!(
-        repo.save_take(&remix, "song.wav", &next.to_hex(), "same"),
+        repo.save_take(
+            TakeFrom::Outside(&remix),
+            "song.wav",
+            &next.to_hex(),
+            "same"
+        ),
         Err(Error::NothingToCommit)
     ));
 
@@ -1106,6 +1118,53 @@ fn a_take_is_saved_beside_the_folder_and_brought_into_it() {
             .is_err()
     );
     assert_eq!(read(&repo, "song.wav"), b"unsaved");
+}
+
+#[test]
+fn another_songs_file_becomes_a_take() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "album take");
+    write(&repo, "demo.wav", "old demo");
+    repo.commit("v1", &[]).unwrap();
+    let v1 = repo.resolve("HEAD").unwrap().to_hex();
+
+    // A saved version of another file, by its content: nothing new is stored.
+    let take = repo
+        .save_take(
+            TakeFrom::Version {
+                rev: &v1,
+                path: "demo.wav",
+            },
+            "song.wav",
+            "HEAD",
+            "from demo",
+        )
+        .unwrap();
+    assert_eq!(
+        saved(&repo, &take.to_hex(), "song.wav").unwrap(),
+        b"old demo"
+    );
+    assert_eq!(read(&repo, "song.wav"), b"album take");
+
+    // A file in the folder as it is now, saved or not.
+    write(&repo, "idea.wav", "new idea");
+    let idea = repo
+        .save_take(
+            TakeFrom::Folder("idea.wav"),
+            "song.wav",
+            &take.to_hex(),
+            "idea",
+        )
+        .unwrap();
+    assert_eq!(
+        saved(&repo, &idea.to_hex(), "song.wav").unwrap(),
+        b"new idea"
+    );
+    assert_eq!(read(&repo, "idea.wav"), b"new idea");
+    assert!(
+        repo.save_take(TakeFrom::Folder("gone.wav"), "song.wav", "HEAD", "x")
+            .is_err()
+    );
 }
 
 #[test]

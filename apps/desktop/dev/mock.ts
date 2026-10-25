@@ -185,6 +185,7 @@ internals.convertFileSrc = (path, scheme) =>
   path.startsWith("mock:cover:") ? sampleCover(Number(path.slice(-1))) : convert(path, scheme);
 /** Shared settings, kept for the page's life. */
 const settings = new Map<string, string>();
+let made = 0;
 mockIPC(
   (cmd, args) => {
     const a = (args ?? {}) as Record<string, unknown>;
@@ -196,7 +197,7 @@ mockIPC(
           { path: "/home/me/Design/Обложки", name: "Обложки", exists: false },
         ];
       case "overview":
-        return overview;
+        return { ...overview, branches: [...overview.branches] };
       case "stats":
         return { snapshots: 6, contentBytes: 420_000_000, storedBytes: 185_000_000 };
       case "status":
@@ -273,8 +274,21 @@ mockIPC(
           : ["/home/me/Downloads/Ночь_final_v7.wav", "/home/me/Downloads/Stems"];
       case "plugin:dialog|ask":
         return true;
-      case "save_take":
-        return id(40);
+      case "save_take": {
+        // A take beside the folder: a version of its own, kept by a take ref.
+        const n = 40 + made++;
+        const parent = a.parent === "HEAD" ? id(6) : String(a.parent);
+        graph.unshift({
+          id: id(n),
+          parents: [parent],
+          message: `«${a.path}», ветка «${a.variant}»`,
+          author: "nikita",
+          createdAt: now - 60 + made,
+          changes: [{ path: String(a.path), kind: "modified", from: null, size: null, pruned: false, labels: [] }],
+        });
+        overview.branches.push({ name: `take/${n}`, head: id(n), current: false });
+        return id(n);
+      }
       case "use_take":
         return id(41);
       case "shared_settings":

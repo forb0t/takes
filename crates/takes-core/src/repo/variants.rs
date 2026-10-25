@@ -13,29 +13,59 @@ use crate::model::Entry;
 /// Refs that keep versions not in the folder's history.
 pub const TAKE_PREFIX: &str = "take/";
 
+/// What a take is made of.
+#[derive(Clone, Copy, Debug)]
+pub enum TakeFrom<'a> {
+    /// A file outside the project, e.g. a bounce from elsewhere.
+    Outside(&'a Path),
+    /// A file of the project folder as it is on disk now, saved or not.
+    Folder(&'a str),
+    /// A file (called `path` there) of a saved version, e.g. another song's.
+    Version { rev: &'a str, path: &'a str },
+}
+
 impl Repo {
-    /// Saves the file `source` from outside as a version of `path` after
-    /// version `parent`, leaving the folder and its history as they are.
+    /// Saves `from` as a version of `path` after version `parent`, leaving
+    /// the folder and its history as they are.
     pub fn save_take(
         &mut self,
-        source: &Path,
+        from: TakeFrom,
         path: &str,
         parent: &str,
         message: &str,
     ) -> Result<Hash> {
-        let source = self.outside(source)?;
-        if !source.is_file() {
-            return Err(Error::InvalidPath(source.display().to_string()));
+        let file = match from {
+            TakeFrom::Outside(source) => Some(self.outside(source)?),
+            TakeFrom::Folder(source) => Some(self.abs(source)?),
+            TakeFrom::Version { .. } => None,
+        };
+        if let Some(file) = &file
+            && !file.is_file()
+        {
+            return Err(Error::InvalidPath(file.display().to_string()));
         }
         let path = path.trim_matches('/');
         self.abs(path)?;
         let _lock = self.lock_shared()?;
         let parent = self.resolve(parent)?;
         let mut tree = self.tree(parent)?;
-        let blob = self.store.put_file(&source)?;
-        let entry = Entry {
-            blob: blob.hash,
-            size: blob.size,
+        let (entry, blobs) = match (from, file) {
+            (TakeFrom::Version { rev, path: source }, _) => {
+                let entry = self.file_at(rev, source)?;
+                if self.is_pruned(entry.blob)? {
+                    return Err(Error::ContentPruned(source.into()));
+                }
+                (entry, Vec::new())
+            }
+            (_, Some(file)) => {
+                let blob = self.store.put_file(&file)?;
+                let entry = Entry {
+                    blob: blob.hash,
+                    size: blob.size,
+                };
+                (entry, vec![blob])
+            }
+            (_, None) => unreachable!("a file outside or in the folder"),
         };
         if tree.get(path) == Some(&entry) {
             return Err(Error::NothingToCommit);
@@ -48,7 +78,7 @@ impl Repo {
             .into_iter()
             .find(|(name, id)| name.starts_with(TAKE_PREFIX) && *id == parent)
             .map_or_else(|| format!("{TAKE_PREFIX}{:x}", now_ns()), |(name, _)| name);
-        self.write_snapshot(&name, &[parent], message, &tree, &[blob])
+        self.write_snapshot(&name, &[parent], message, &tree, &blobs)
     }
 
     /// Brings version `rev` of a file (called `from` there) into the folder

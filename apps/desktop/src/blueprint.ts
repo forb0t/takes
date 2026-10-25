@@ -1,11 +1,12 @@
 /**
  * The project diagram, drawn as a blueprint: one lane per song (file) that
  * starts with the song's own node. Every song has branches of its own, each
- * a band of the lane: the branch's node, its versions from left to right
- * and a place to add a file. Takes are sorted into branches (people drag a
- * take from one band to another); one branch is the one in the folder,
- * where new versions of the file go on, and its file on disk, when not
- * saved, stands at the end of its band.
+ * a band of the lane: the branch's node, its versions wired one after
+ * another and a place to add a file. The wires are what people change:
+ * each version follows a branch's node, another version, or nothing when
+ * unplugged (those stand apart, below the bands). One branch is the one in
+ * the folder, where new versions of the file go on, and its file on disk,
+ * when not saved, stands after the version it was made from.
  */
 import type { Branch, ChangeKind, GraphVersion } from "./api";
 import type { FileStatus, ProjectFile } from "./components/FilesTab";
@@ -25,6 +26,8 @@ export const HEAD_H = 28;
 /** Execution pins, from the top of a node. */
 export const PIN_Y = HEAD_H + 14;
 export const COL_W = NODE_W + 64;
+/** Between pieces of unplugged versions in their row. */
+export const PIECE_GAP = 56;
 export const ROW_H = NODE_H + 26;
 export const LANE_PAD = 18;
 export const LANE_GAP = 30;
@@ -53,15 +56,16 @@ export interface SongVersion {
   labels: string[];
   /** The content's hash. */
   blob: string | null;
+  size: number | null;
   /** Earlier versions of this song it was made from (in the history of the project). */
   parents: string[];
-  /** The version before it in its branch. */
+  /** The version before it on its wire. */
   links: string[];
-  /** For the first version of a branch: the version of another branch it started from. */
+  /** For the first version on a wire: the version of another branch it started from. */
   fork: string | null;
   /** v1, v2… in the order the song's versions were saved; null for a deletion. */
   number: number | null;
-  /** The song's branch it belongs to. */
+  /** The song's branch it is wired into; "" when unplugged. */
   branch: string;
   /** In the history of the folder. */
   onCurrent: boolean;
@@ -111,12 +115,19 @@ export interface Lane {
   id: string;
   /** Every name the song had, its current one first. */
   names: string[];
-  /** The song's branches, the one in the folder first. */
+  /** The song's branches: the main one first, then in the order they started. */
   branches: SongBranch[];
-  /** Version (short id) → its branch, for every version of the song. */
-  branchOf: SongBranches;
+  /** Version (short id) → its branch ("" when unplugged), for every version of the song. */
+  branchOf: Record<string, string>;
+  /** How every version of the song is wired, as kept (see SongLinks). */
+  links: SongLinks;
+  /** Versions not drawn: they bring the content of the one before into the folder. */
+  hidden: string[];
+  /** The row of versions not wired into any branch, below the bands. */
+  looseRow: number | null;
   status: LaneStatus;
   nodes: LaneNode[];
+  /** The bands and the row of unplugged versions. */
   rows: number;
   cols: number;
   /** Saved versions, deletions not counted. */
@@ -143,7 +154,11 @@ export interface Layout {
 export const SONG_KEY = "song";
 /** The start of a new branch, below the bands. */
 export const NEW_BRANCH_KEY = "+branch";
-export const branchKey = (name: string) => `b:${name}`;
+/** A branch's node; also what its first version follows, as kept. */
+export const BRANCH_PREFIX = "b:";
+export const branchKey = (name: string) => `${BRANCH_PREFIX}${name}`;
+/** The start of the row of unplugged versions. */
+export const LOOSE_KEY = branchKey("");
 export const addKey = (name: string) => `+:${name}`;
 /** A node as the layout knows it: the file on disk keeps its key across versions. */
 export const nodeKey = (n: LaneNode) => (n.kind === "work" ? "work" : n.key);
@@ -166,6 +181,14 @@ export interface PlacedLane {
   pinned: boolean;
   /** Nodes taken out of the lane: each lies on its own wherever it was put. */
   free: Set<string>;
+}
+
+/** Whether the lane draws a node of this key (one the layout may know from before). */
+function drawn(lane: Lane, key: string): boolean {
+  if (key === SONG_KEY) return true;
+  if (key === LOOSE_KEY) return lane.looseRow !== null;
+  if (key.startsWith(BRANCH_PREFIX)) return lane.branches.some((b) => branchKey(b.name) === key);
+  return lane.nodes.some((n) => nodeKey(n) === key);
 }
 
 /** A branch's band in its lane, from the lane's origin. */
@@ -205,20 +228,23 @@ export function placeLanes(lanes: Lane[], layout: Layout): PlacedLane[] {
     const put = (key: string, p: Point) => out[key] === undefined && at.set(key, p);
     put(SONG_KEY, { x: LANE_PAD, y: nodeY(0) });
     for (const b of lane.branches) put(branchKey(b.name), { x: BRANCH_X, y: nodeY(b.row) });
-    // A band closes up where a node was taken out of it.
+    if (lane.looseRow !== null) put(LOOSE_KEY, { x: BRANCH_X, y: nodeY(lane.looseRow) });
+    // A band closes up where a node was taken out of it; unplugged pieces stand apart.
     const next = new Map<number, number>();
     for (const n of [...lane.nodes].sort((a, b) => a.row - b.row || a.col - b.col)) {
       if (out[nodeKey(n)] !== undefined) continue;
-      const col = next.get(n.row) ?? 0;
-      at.set(nodeKey(n), { x: nodeX(col), y: nodeY(n.row) });
-      next.set(n.row, col + 1);
+      let x = next.get(n.row);
+      if (x === undefined) x = nodeX(0);
+      else if (n.row === lane.looseRow && n.kind === "version" && !n.links.length) x += PIECE_GAP;
+      at.set(nodeKey(n), { x, y: nodeY(n.row) });
+      next.set(n.row, x + COL_W);
     }
     if (growing(lane)) {
-      for (const b of lane.branches) at.set(addKey(b.name), { x: nodeX(next.get(b.row) ?? 0), y: nodeY(b.row) });
-      at.set(NEW_BRANCH_KEY, { x: BRANCH_X, y: nodeY(lane.branches.length) });
+      for (const b of lane.branches) at.set(addKey(b.name), { x: next.get(b.row) ?? nodeX(0), y: nodeY(b.row) });
+      at.set(NEW_BRANCH_KEY, { x: BRANCH_X, y: nodeY(lane.rows) });
     }
     const pos = lane.names.map((n) => layout.lanes[n]).find((p) => p !== undefined);
-    const free = new Set(Object.keys(out).filter((key) => key === SONG_KEY || key === "work" || key.startsWith("b:") || lane.nodes.some((n) => n.key === key)));
+    const free = new Set(Object.keys(out).filter((key) => drawn(lane, key)));
     const lanePlaced = {
       lane,
       origin: pos ? { x: pos[0], y: pos[1] } : { x: 0, y: 0 },
@@ -248,10 +274,22 @@ export function placeLanes(lanes: Lane[], layout: Layout): PlacedLane[] {
 
 /** The branch every song starts with. */
 export const MAIN_BRANCH = "основная";
-/** A song's branches as kept in the project: version (short id) → branch. */
-export type SongBranches = Record<string, string>;
+/**
+ * How a song's versions are wired, as kept in the project: version (short
+ * id) → what it follows: a branch's node (`branchKey`), another version
+ * (its short id), or nothing ("") when unplugged.
+ */
+export type SongLinks = Record<string, string>;
+/** What the project keeps per song. */
+export interface SongWiring {
+  links: SongLinks;
+  /** From before songs were wired: version → branch, in the order they were saved. */
+  branches: Record<string, string>;
+}
 export const shortId = (id: string) => id.slice(0, 16);
-/** Where a song's branches are kept, as a shared setting. */
+/** A version's short id from its node's key. */
+export const sidOf = (key: string) => shortId(key.slice(0, key.indexOf(":")));
+/** Where a song's wiring is kept, as a shared setting. */
 export const SONG_BRANCHES = "track.";
 
 function fnv(text: string, seed: number): string {
@@ -281,7 +319,7 @@ const keyOf = (id: string, path: string) => `${id}:${path}`;
 /**
  * Builds every lane. `versions` come newest first (children before
  * parents), `order` is the song order people chose (others follow by name),
- * `songBranches` the songs' branches by song id.
+ * `wiring` how the songs' versions are wired, by song id.
  */
 export function buildLanes(
   versions: GraphVersion[],
@@ -289,7 +327,7 @@ export function buildLanes(
   files: ProjectFile[],
   removed: Set<string>,
   order: string[],
-  songBranches: Map<string, SongBranches>,
+  wiring: Map<string, SongWiring>,
 ): Lane[] {
   const nodes = new Map<string, SongVersion>();
   /** Per version: for each song, the latest versions of it in that version's history. */
@@ -352,6 +390,7 @@ export function buildLanes(
         pruned: c.pruned,
         labels: c.labels,
         blob: c.blob ?? null,
+        size: c.size,
         parents: inherited.get(before) ?? [],
         links: [],
         fork: null,
@@ -415,7 +454,7 @@ export function buildLanes(
     const path = file?.path ?? list[list.length - 1].path;
 
     const id = songId(list[0]?.path ?? path);
-    const kept = songBranches.get(id) ?? {};
+    const kept = wiring.get(id) ?? { links: {}, branches: {} };
 
     let n = 0;
     for (const node of list) if (node.change !== "deleted") node.number = ++n;
@@ -436,76 +475,169 @@ export function buildLanes(
       }
     }
 
-    // The song's branch of each version: as kept, else the one of the
-    // project branch it is on (from before songs had branches), else the
-    // one of the version it was made from.
-    const branchOf: SongBranches = {};
-    for (const node of list) {
-      const old = node.owner && node.owner !== current?.name && !node.owner.startsWith(TAKE_PREFIX);
-      const before = node.parents.map((p) => nodes.get(p)?.branch).find((b) => b !== undefined);
-      node.branch = kept[shortId(node.version.id)] ?? (old ? node.owner! : (before ?? MAIN_BRANCH));
-      branchOf[shortId(node.version.id)] = node.branch;
-    }
-
-    // A version with the content its branch had just before adds nothing
-    // to see (it brought that branch into the folder): it stands for the one before.
-    const same = new Map<string, string>();
-    const lastIn = new Map<string, SongVersion>();
-    for (const node of list) {
-      const before = lastIn.get(node.branch);
-      if (before && node.blob && before.blob === node.blob && node.change !== "deleted") {
-        same.set(node.key, before.key);
-      } else {
-        lastIn.set(node.branch, node);
+    // What each version follows: as wired, else (saved since, or from
+    // before songs were wired) the end of the wire the version it was made
+    // from is on, or of the branch it was kept in, or of an old project
+    // branch it is on.
+    const sid = (node: SongVersion) => shortId(node.version.id);
+    const bySid = new Map<string, SongVersion>();
+    for (const node of list) if (!bySid.has(sid(node))) bySid.set(sid(node), node);
+    const inLane = new Set(list.map((node) => node.key));
+    /** Version → a branch's node, the version before it, or "" for nothing. */
+    const parentOf = new Map<string, string>();
+    /** A branch's node or a version → the version after it. */
+    const childOf = new Map<string, string>();
+    const endOf = (ref: string) => {
+      const seen = new Set<string>();
+      let at = ref;
+      for (let next = childOf.get(at); next !== undefined && !seen.has(next); next = childOf.get(at)) {
+        seen.add(next);
+        at = next;
       }
+      return at;
+    };
+    // A place taken already (by two devices at once): after what follows it there.
+    const attach = (node: SongVersion, ref: string) => {
+      const at = ref === "" || ref === node.key ? "" : endOf(ref);
+      parentOf.set(node.key, at);
+      if (at !== "") childOf.set(at, node.key);
+    };
+    for (const node of list) {
+      const link = kept.links[sid(node)];
+      if (link === undefined) continue;
+      attach(
+        node,
+        link.startsWith(BRANCH_PREFIX) && link !== LOOSE_KEY ? link : link ? (bySid.get(link)?.key ?? "") : "",
+      );
     }
-    const shown = list.filter((node) => !same.has(node.key));
-    const seen = (key: string) => same.get(key) ?? key;
+    for (const node of list) {
+      if (kept.links[sid(node)] !== undefined) continue;
+      const old = node.owner && node.owner !== current?.name && !node.owner.startsWith(TAKE_PREFIX);
+      const branch = kept.branches[sid(node)] ?? (old ? node.owner! : null);
+      const before = branch === null ? node.parents.find((k) => inLane.has(k) && parentOf.has(k)) : undefined;
+      attach(node, branch !== null ? branchKey(branch) : (before ?? branchKey(MAIN_BRANCH)));
+    }
 
-    // Bands: the main branch first, then in the order they started; they
-    // keep their places when another branch goes into the folder.
+    // The branch's node each version is wired to ("" for none); wired in a
+    // circle (two devices at once), the oldest one there is unplugged.
+    const rootOf = new Map<string, string>();
+    for (const node of list) {
+      const path: string[] = [];
+      let at = node.key;
+      let root: string | undefined;
+      while (root === undefined) {
+        if (rootOf.has(at)) root = rootOf.get(at)!;
+        else if (!inLane.has(at)) root = at;
+        else if (path.includes(at)) {
+          const circle = path.slice(path.indexOf(at));
+          const oldest = list.find((x) => circle.includes(x.key))!;
+          childOf.delete(parentOf.get(oldest.key)!);
+          parentOf.set(oldest.key, "");
+          path.length = 0;
+          at = node.key;
+        } else {
+          path.push(at);
+          at = parentOf.get(at)!;
+        }
+      }
+      for (const key of path) rootOf.set(key, root);
+    }
+    for (const node of list) {
+      const root = rootOf.get(node.key)!;
+      node.branch = root.startsWith(BRANCH_PREFIX) ? root.slice(BRANCH_PREFIX.length) : "";
+    }
+    const wireFrom = (start: string) => {
+      const wire: SongVersion[] = [];
+      const seen = new Set<string>();
+      for (let k = childOf.get(start); k !== undefined && !seen.has(k); k = childOf.get(k)) {
+        seen.add(k);
+        wire.push(nodes.get(k)!);
+      }
+      return wire;
+    };
+
+    // A version with the content of the one before it on its wire adds
+    // nothing to see (it brought that one into the folder): it stands for it.
+    const same = new Map<string, string>();
+    const drawnOf = (wire: SongVersion[]) => {
+      let last: SongVersion | undefined;
+      return wire.filter((node) => {
+        if (last && node.blob && last.blob === node.blob && node.change !== "deleted") {
+          same.set(node.key, last.key);
+          return false;
+        }
+        last = node;
+        return true;
+      });
+    };
+    const branchWires = new Map<string, SongVersion[]>();
+    for (const root of new Set(rootOf.values())) {
+      if (root.startsWith(BRANCH_PREFIX)) branchWires.set(root.slice(BRANCH_PREFIX.length), drawnOf(wireFrom(root)));
+    }
+    const pieces = list
+      .filter((node) => parentOf.get(node.key) === "")
+      .map((node) => drawnOf([node, ...wireFrom(node.key)]));
+    const seen = (key: string) => same.get(key) ?? key;
+    const shown = list.filter((node) => !same.has(node.key));
+    const shownKeys = new Set(shown.map((node) => node.key));
+
+    // The branch in the folder: the one its version is wired into ("" when unplugged).
     const tip = tipsAt(current?.head, names).map(seen);
     const inFolder = tip.map((k) => nodes.get(k)!).find((node) => node.change !== "deleted");
     const active = inFolder?.branch ?? (list.length ? list[list.length - 1].branch : MAIN_BRANCH);
-    const started = [...new Set([...shown.map((node) => node.branch), active])];
-    const rowNames = [...started.filter((b) => b === MAIN_BRANCH), ...started.filter((b) => b !== MAIN_BRANCH)];
-
-    // Each band: its versions one after another; the first one may have
-    // started from a version of another branch.
-    const prevIn = new Map<string, SongVersion>();
-    const count = new Map<string, number>();
-    const shownKeys = new Set(shown.map((node) => node.key));
-    for (const node of shown) {
-      const before = prevIn.get(node.branch);
-      node.links = before ? [before.key] : [];
-      node.fork = before
-        ? null
-        : (node.parents.map(seen).find((k) => shownKeys.has(k) && nodes.get(k)!.branch !== node.branch) ?? null);
-      node.col = count.get(node.branch) ?? 0;
-      node.row = rowNames.indexOf(node.branch);
-      count.set(node.branch, node.col + 1);
-      prevIn.set(node.branch, node);
-    }
     if (inFolder) inFolder.inFolder = file?.status === "saved";
 
-    const laneNodes: LaneNode[] = [...shown];
-    if (file && file.status !== "saved") {
-      const row = rowNames.indexOf(active);
-      const col = count.get(active) ?? 0;
-      count.set(active, col + 1);
-      laneNodes.push({
-        kind: "work",
-        key: `w:${path}`,
-        path,
-        status: file.status,
-        parent: inFolder?.key ?? (tip[0] ? nodes.get(tip[0])!.key : null),
-        col,
-        row,
-      });
-    }
+    // Bands: the main branch first, then in the order they started; they
+    // keep their places when another branch goes into the folder.
+    const started = [...new Set([...shown.map((node) => node.branch), active])].filter((b) => b !== "");
+    const rowNames = [...started.filter((b) => b === MAIN_BRANCH), ...started.filter((b) => b !== MAIN_BRANCH)];
+    const looseRow = pieces.length ? rowNames.length : null;
+
+    // Each wire one node after another; the file on disk after the version it was made from.
+    let work: WorkNode | null =
+      file && file.status !== "saved"
+        ? {
+            kind: "work",
+            key: `w:${path}`,
+            path,
+            status: file.status,
+            parent: inFolder?.key ?? (tip[0] ? nodes.get(tip[0])!.key : null),
+            col: 0,
+            row: 0,
+          }
+        : null;
+    const laneNodes: LaneNode[] = [];
+    const count = new Map<number, number>();
+    const lay = (wire: SongVersion[], row: number, folder: boolean) => {
+      let before: SongVersion | undefined;
+      for (const node of wire) {
+        node.links = before ? [before.key] : [];
+        node.fork = before
+          ? null
+          : (node.parents.map(seen).find((k) => shownKeys.has(k) && nodes.get(k)!.branch !== node.branch) ?? null);
+        node.row = row;
+        node.col = count.get(row) ?? 0;
+        count.set(row, node.col + 1);
+        laneNodes.push(node);
+        before = node;
+      }
+      if (work && folder) {
+        work.row = row;
+        work.col = count.get(row) ?? 0;
+        count.set(row, work.col + 1);
+        laneNodes.push(work);
+        work = null;
+      }
+    };
+    rowNames.forEach((name, row) => {
+      const wire = branchWires.get(name) ?? [];
+      lay(wire, row, inFolder ? wire.includes(inFolder) : name === active);
+    });
+    for (const piece of pieces) lay(piece, looseRow!, !!inFolder && piece.includes(inFolder));
+    if (work) lay([], Math.max(0, rowNames.indexOf(active)), true);
 
     const branches = rowNames.map((name, row): SongBranch => {
-      const own = shown.filter((node) => node.branch === name);
+      const own = branchWires.get(name) ?? [];
       const fork = own[0]?.fork ? nodes.get(own[0].fork) : undefined;
       return {
         name,
@@ -514,19 +646,33 @@ export function buildLanes(
         versions: own.filter((node) => node.change !== "deleted").length,
         active: name === active && !!file,
         from: fork?.number ?? null,
-        addCol: count.get(name) ?? 0,
+        addCol: count.get(row) ?? 0,
       };
     });
+
+    // As kept: every version, so the ones saved since go on where they belong.
+    const links: SongLinks = {};
+    const branchOf: Record<string, string> = {};
+    for (const node of list) {
+      const p = parentOf.get(node.key)!;
+      links[sid(node)] = p === "" || p.startsWith(BRANCH_PREFIX) ? p : sid(nodes.get(p)!);
+      branchOf[sid(node)] = node.branch;
+    }
+    const rows = rowNames.length + (looseRow !== null ? 1 : 0);
+
     lanes.push({
       path,
       id,
       names: [path, ...[...names].filter((n) => n !== path)],
       branches,
       branchOf,
+      links,
+      hidden: [...same.keys()].map((k) => sid(nodes.get(k)!)),
+      looseRow,
       status: file ? file.status : removed.has(path) ? "removed" : "elsewhere",
       nodes: laneNodes,
-      rows: branches.length,
-      cols: Math.max(0, ...branches.map((b) => b.addCol + 1)),
+      rows,
+      cols: Math.max(0, ...[...count.values()].map((c) => c + 1)),
       versions: n,
       branchNames: file
         ? []

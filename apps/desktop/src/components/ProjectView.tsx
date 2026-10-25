@@ -46,7 +46,23 @@ export function ProjectView({ root }: { root: string }) {
   const [changes, setChanges] = useState<Change[] | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("files");
+  // The diagram is where the work is done; the other tabs follow it.
+  const [tab, setTabState] = useState<Tab>(() => {
+    try {
+      const saved = localStorage.getItem("takes.tab");
+      return saved === "files" || saved === "history" ? saved : "blueprint";
+    } catch {
+      return "blueprint";
+    }
+  });
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    try {
+      localStorage.setItem("takes.tab", next);
+    } catch {
+      // A convenience only.
+    }
+  };
   const [editAuthor, setEditAuthor] = useState(false);
   const [syncState, setSyncState] = useState<SyncState | null>(null);
   const [mergeFrom, setMergeFrom] = useState<DivergedBranch | null>(null);
@@ -355,11 +371,11 @@ export function ProjectView({ root }: { root: string }) {
       )}
 
       <nav className="tabs">
-        <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>
-          Файлы {count > 0 && <span className="badge" title="Не сохранено">{count}</span>}
-        </button>
         <button className={tab === "blueprint" ? "active" : ""} onClick={() => setTab("blueprint")}>
           Схема
+        </button>
+        <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>
+          Файлы {count > 0 && <span className="badge" title="Не сохранено">{count}</span>}
         </button>
         <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
           История
