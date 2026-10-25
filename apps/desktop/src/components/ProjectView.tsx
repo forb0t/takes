@@ -208,7 +208,7 @@ export function ProjectView({ root }: { root: string }) {
         const target = targetAt(e.payload.position);
         hover(null);
         setDropping(false);
-        if (target) target.dispatchEvent(new CustomEvent("filedrop", { detail: e.payload.paths }));
+        if (target) target.dispatchEvent(new CustomEvent("filedrop", { detail: e.payload.paths, bubbles: true }));
         else if (e.payload.paths.length > 0) setImporting({ sources: e.payload.paths });
       }
     });

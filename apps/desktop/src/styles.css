@@ -2728,60 +2728,101 @@ input[type="checkbox"]:disabled {
   cursor: grabbing;
 }
 
-/* The branches a dragged version can go to. */
-.bp-dock {
+/* A song's branch: a band across the lane, its own node at the start. */
+.bp-band {
   position: absolute;
-  top: 12px;
-  left: 50%;
-  z-index: 8;
+  border: 1px dashed transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.bp-band.active {
+  background: rgba(95, 209, 139, 0.05);
+}
+
+.bp-lane.dragging-in .bp-band {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.bp-band.target,
+.bp-lane.dragging-in .bp-band.target {
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.bp-band-hint {
+  position: absolute;
+  right: 12px;
+  bottom: 6px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* While a version is dragged, only the bands catch the pointer. */
+.bp-lane.dragging-in .bp-node,
+.bp-lane.dragging-in .bp-add,
+.bp-lane.dragging-in .bp-lane-title {
+  pointer-events: none;
+}
+
+.bp-branch-node {
+  --head: #2f7a4c;
+}
+
+.bp-branch-node:not(.active) {
+  --head: #3d5f4a;
+}
+
+.bp-add,
+.bp-newbranch {
+  position: absolute;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  max-width: calc(100% - 32px);
-  padding: 10px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  background: rgba(17, 17, 20, 0.95);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-  font-size: 12.5px;
-  transform: translateX(-50%);
-}
-
-.bp-dock-title {
-  color: var(--muted);
-}
-
-.bp-dock-branch {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-  padding: 8px 14px;
-  border: 1.5px dashed var(--border-strong);
+  border: 1.5px dashed rgba(255, 255, 255, 0.22);
   border-radius: 9px;
-  color: var(--text);
+  color: var(--muted);
+  font-size: 13px;
   font-weight: 600;
 }
 
-.bp-dock-branch.new {
-  color: var(--muted);
+.bp-add {
+  flex-direction: column;
+  gap: 2px;
 }
 
-.branch-file {
-  justify-content: flex-start;
-}
-
-.branch-file-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bp-dock-branch.over {
-  border: 1.5px solid var(--accent);
-  background: var(--accent-soft);
+.bp-add:hover,
+.bp-newbranch:hover,
+.bp-add.drop-over,
+.bp-newbranch.drop-over {
+  border-color: var(--accent);
   color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.bp-newbranch.target {
+  border: 2px solid var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* A version just moved to another branch. */
+.bp-node.flash {
+  animation: bp-flash 1.5s ease-out;
+}
+
+@keyframes bp-flash {
+  0%,
+  40% {
+    box-shadow:
+      0 0 0 3px var(--accent),
+      0 0 24px var(--accent);
+  }
+  100% {
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55);
+  }
 }
 
 .bp-empty {

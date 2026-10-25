@@ -841,7 +841,7 @@ function SongBranches({ songs, laneOf }: { songs: Songs; laneOf: () => ReturnTyp
                         className="popover-main"
                         onClick={() => {
                           setMenu(null);
-                          songs.addToBranch(lane, head);
+                          songs.addFile(lane, b.name);
                         }}
                       >
                         <Icon name="download" size={14} /> Новая версия в ветку…

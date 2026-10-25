@@ -32,8 +32,11 @@ export interface Songs {
   sortInto: (lane: Lane, change: SongBranches) => void;
   /** Puts a version into the folder, saved there; its branch is then the song's branch in the folder. */
   intoFolder: (lane: Lane, n: SongVersion) => Promise<void>;
-  /** A file from disk as the next version of a branch not in the folder. */
-  addToBranch: (lane: Lane, n: SongVersion) => Promise<void>;
+  /**
+   * A file from disk (picked, or `source`) as the next version of a branch:
+   * into the folder for the branch in the folder, beside it for another.
+   */
+  addFile: (lane: Lane, branch: string, source?: string) => Promise<void>;
   /** A new branch whose first version is a file from disk, after version `parent` ("HEAD": the folder's). */
   createBranch: (lane: Lane, parent: string, name: string, source: string, intoFolder: boolean) => Promise<void>;
   renameBranch: (lane: Lane, from: string, to: string) => void;
@@ -164,13 +167,25 @@ export function useSongs(
         toast(errorText(e), "error");
       }
     },
-    addToBranch: async (lane, n) => {
-      const source = await open({ multiple: false, title: `Новая версия «${name(lane)}», ветка «${n.branch}»` });
-      if (typeof source !== "string") return;
+    addFile: async (lane, branch, source) => {
+      const file = source ?? (await open({ multiple: false, title: `Новая версия «${name(lane)}», ветка «${branch}»` }));
+      if (typeof file !== "string") return;
+      const b = lane.branches.find((x) => x.name === branch);
+      const head = lane.nodes.find((n): n is SongVersion => n.kind === "version" && n.key === b?.head);
       try {
-        const id = await api.saveTake(root, source, lane.path, n.version.id, n.branch);
-        sortInto(lane, { [shortId(id)]: n.branch });
-        toast(`Версия сохранена в ветке «${n.branch}»`, "ok");
+        if (!b || b.active || !head) {
+          if (lane.status !== "saved" && lane.status !== "deleted") {
+            toast(`Сначала сохраните или отмените изменения «${name(lane)}»: они не должны потеряться.`, "error");
+            return;
+          }
+          const result = await api.importFiles(root, [file], { asPath: lane.path, save: true });
+          if (result.saved === 0) toast("Такой файл уже сохранён", "info");
+          else toast(`Новая версия «${name(lane)}» в ветке «${branch}»`, "ok");
+        } else {
+          const id = await api.saveTake(root, file, lane.path, head.version.id, branch);
+          sortInto(lane, { [shortId(id)]: branch });
+          toast(`Новая версия «${name(lane)}» в ветке «${branch}»`, "ok");
+        }
         onChanged();
       } catch (e) {
         toast(errorText(e), "error");

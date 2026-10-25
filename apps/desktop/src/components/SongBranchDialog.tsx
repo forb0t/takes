@@ -12,6 +12,7 @@ export function SongBranchDialog({
   path,
   taken,
   start,
+  source: dropped,
   onCreate,
   onClose,
 }: {
@@ -21,12 +22,14 @@ export function SongBranchDialog({
   taken: string[];
   /** What the branch starts from, for the hint: "текущей версии", "версии 3"… */
   start: string;
+  /** A file already chosen, e.g. dropped on the diagram. */
+  source?: string;
   onCreate: (name: string, source: string, intoFolder: boolean) => Promise<void>;
   onClose: () => void;
 }) {
   const song = splitPath(path).name;
   const [name, setName] = useState("");
-  const [source, setSource] = useState<string | null>(null);
+  const [source, setSource] = useState<string | null>(dropped ?? null);
   const [intoFolder, setIntoFolder] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
