@@ -35,7 +35,7 @@ export const ADD_W = 136;
 /** The place below the bands to start a branch. */
 export const NEW_BRANCH_H = 56;
 /** Branch nodes sit past the song's own node and a wire's length. */
-const BRANCH_X = LANE_PAD + SONG_W + 64;
+export const BRANCH_X = LANE_PAD + SONG_W + 64;
 /** The first version of each branch, past its branch node. */
 const VERSION_X = BRANCH_X + BRANCH_W + 56;
 
@@ -135,6 +135,8 @@ export type Rect = { x: number; y: number; w: number; h: number };
 export interface Layout {
   /** Song → where its lane lies. */
   lanes: Record<string, [number, number]>;
+  /** Song → node taken out of its lane → where it lies on the canvas. */
+  free: Record<string, Record<string, [number, number]>>;
 }
 
 /** The song's own node, as the layout knows it. */
@@ -158,11 +160,16 @@ export interface PlacedLane {
   origin: Point;
   /** Each node's place from the origin, the song's own under SONG_KEY. */
   at: Map<string, Point>;
-  /** The frame around the nodes, from the origin. */
+  /** The frame around the nodes in the lane, from the origin. */
   frame: Rect;
   /** Placed by hand; the others go one under another below. */
   pinned: boolean;
+  /** Nodes taken out of the lane: each lies on its own wherever it was put. */
+  free: Set<string>;
 }
+
+/** A branch's band in its lane, from the lane's origin. */
+export const bandRect = (row: number): Rect => ({ x: BRANCH_X - 10, y: nodeY(row) - 9, w: 0, h: NODE_H + 18 });
 
 /** The frame around a lane's nodes, with its title on top. */
 export function frameOf(at: Map<string, Point>): Rect {
@@ -185,19 +192,43 @@ export function frameOf(at: Map<string, Point>): Rect {
   };
 }
 
-/** Places every lane where people put it, or one under another; its nodes in its bands. */
+/**
+ * Places every lane where people put it, or one under another; the nodes
+ * in it in their bands, one after another, and the ones taken out wherever
+ * they were put.
+ */
 export function placeLanes(lanes: Lane[], layout: Layout): PlacedLane[] {
+  const loose = new Map<PlacedLane, Record<string, [number, number]>>();
   const placed = lanes.map((lane): PlacedLane => {
+    const out = lane.names.map((n) => layout.free[n]).find((m) => m !== undefined) ?? {};
     const at = new Map<string, Point>();
-    at.set(SONG_KEY, { x: LANE_PAD, y: nodeY(0) });
-    for (const b of lane.branches) {
-      at.set(branchKey(b.name), { x: BRANCH_X, y: nodeY(b.row) });
-      if (growing(lane)) at.set(addKey(b.name), { x: nodeX(b.addCol), y: nodeY(b.row) });
+    const put = (key: string, p: Point) => out[key] === undefined && at.set(key, p);
+    put(SONG_KEY, { x: LANE_PAD, y: nodeY(0) });
+    for (const b of lane.branches) put(branchKey(b.name), { x: BRANCH_X, y: nodeY(b.row) });
+    // A band closes up where a node was taken out of it.
+    const next = new Map<number, number>();
+    for (const n of [...lane.nodes].sort((a, b) => a.row - b.row || a.col - b.col)) {
+      if (out[nodeKey(n)] !== undefined) continue;
+      const col = next.get(n.row) ?? 0;
+      at.set(nodeKey(n), { x: nodeX(col), y: nodeY(n.row) });
+      next.set(n.row, col + 1);
     }
-    for (const n of lane.nodes) at.set(nodeKey(n), { x: nodeX(n.col), y: nodeY(n.row) });
-    if (growing(lane)) at.set(NEW_BRANCH_KEY, { x: BRANCH_X, y: nodeY(lane.branches.length) });
+    if (growing(lane)) {
+      for (const b of lane.branches) at.set(addKey(b.name), { x: nodeX(next.get(b.row) ?? 0), y: nodeY(b.row) });
+      at.set(NEW_BRANCH_KEY, { x: BRANCH_X, y: nodeY(lane.branches.length) });
+    }
     const pos = lane.names.map((n) => layout.lanes[n]).find((p) => p !== undefined);
-    return { lane, origin: pos ? { x: pos[0], y: pos[1] } : { x: 0, y: 0 }, at, frame: frameOf(at), pinned: !!pos };
+    const free = new Set(Object.keys(out).filter((key) => key === SONG_KEY || key === "work" || key.startsWith("b:") || lane.nodes.some((n) => n.key === key)));
+    const lanePlaced = {
+      lane,
+      origin: pos ? { x: pos[0], y: pos[1] } : { x: 0, y: 0 },
+      at,
+      frame: frameOf(at),
+      pinned: !!pos,
+      free,
+    };
+    loose.set(lanePlaced, out);
+    return lanePlaced;
   });
   const pinned = placed.filter((p) => p.pinned);
   let y = pinned.length ? Math.max(...pinned.map((p) => p.origin.y + p.frame.y + p.frame.h)) + LANE_GAP * 2 : 0;
@@ -206,6 +237,11 @@ export function placeLanes(lanes: Lane[], layout: Layout): PlacedLane[] {
     if (p.pinned) continue;
     p.origin = { x: x - p.frame.x, y: y - p.frame.y };
     y += p.frame.h + LANE_GAP;
+  }
+  // Nodes taken out lie where they were put on the canvas.
+  for (const p of placed) {
+    const out = loose.get(p)!;
+    for (const key of p.free) p.at.set(key, { x: out[key][0] - p.origin.x, y: out[key][1] - p.origin.y });
   }
   return placed;
 }

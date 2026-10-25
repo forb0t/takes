@@ -1,14 +1,15 @@
+import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, errorText, type ChangeKind, type Overview, type RemovedFile } from "../api";
 import {
   LANE_PAD,
   NEW_BRANCH_KEY,
-  NODE_H,
   PIN_Y,
   SONG_KEY,
   SONG_W,
   addKey,
+  bandRect,
   branchKey,
   growing,
   laneGroup,
@@ -84,8 +85,9 @@ const COLORS: [string, number][] = [
 
 /** What is being dragged, and how far, in canvas pixels. */
 type Drag =
-  | { kind: "node"; lane: string; key: string; by: Point; branch: string | null }
-  | { kind: "lane"; lane: string; by: Point }
+  /** `band`: the band under the pointer (NEW_BRANCH: "+ ветка"); `home`: over its own lane. */
+  | { kind: "node"; lane: string; key: string; by: Point; band: string | null; home: boolean }
+  | { kind: "lane"; lane: string; by: Point; tiles: string[] }
   | { kind: "tile"; id: string; by: Point; lanes: string[]; tiles: string[] }
   | { kind: "size"; id: string; by: Point };
 
@@ -163,11 +165,11 @@ function saveView(root: string, view: View) {
 function parseLayout(value: string | null): Layout {
   try {
     const v = JSON.parse(value ?? "null");
-    if (v && typeof v === "object") return { lanes: v.lanes ?? {} };
+    if (v && typeof v === "object") return { lanes: v.lanes ?? {}, free: v.free ?? {} };
   } catch {
     // Written by a newer version, or broken: lay out anew.
   }
-  return { lanes: {} };
+  return { lanes: {}, free: {} };
 }
 
 function parseTiles(value: string | null): Tile[] {
@@ -255,7 +257,7 @@ export function BlueprintTab({
   const toast = useToast();
   const player = usePlayer();
   const actions = useFileActions(root, onChanged);
-  const [layout, setLayout] = useState<Layout>({ lanes: {} });
+  const [layout, setLayout] = useState<Layout>({ lanes: {}, free: {} });
   /** A version just moved to another branch, shown for a moment. */
   const [flash, setFlash] = useState<string | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]);
@@ -316,9 +318,15 @@ export function BlueprintTab({
     const moved = drag.kind === "lane" ? [drag.lane] : drag.kind === "tile" ? drag.lanes : [];
     return basePlaced.map((p) => {
       if (moved.includes(p.lane.path)) {
-        return { ...p, origin: { x: p.origin.x + drag.by.x, y: p.origin.y + drag.by.y } };
+        // Nodes taken out of the lane stay where they are.
+        const at = new Map(p.at);
+        for (const key of p.free) {
+          const was = at.get(key)!;
+          at.set(key, { x: was.x - drag.by.x, y: was.y - drag.by.y });
+        }
+        return { ...p, at, origin: { x: p.origin.x + drag.by.x, y: p.origin.y + drag.by.y } };
       }
-      // A dragged version follows the pointer; its lane stays as it was.
+      // A dragged node follows the pointer; its lane stays as it was.
       if (drag.kind === "node" && p.lane.path === drag.lane) {
         const at = new Map(p.at);
         const was = at.get(drag.key)!;
@@ -330,8 +338,11 @@ export function BlueprintTab({
   }, [basePlaced, drag]);
 
   const shownTiles = useMemo(() => {
-    if (!drag || (drag.kind !== "tile" && drag.kind !== "size")) return tiles;
+    if (!drag || drag.kind === "node") return tiles;
     return tiles.map((t) => {
+      if (drag.kind === "lane") {
+        return drag.tiles.includes(t.id) ? { ...t, x: t.x + drag.by.x, y: t.y + drag.by.y } : t;
+      }
       if (drag.kind === "size" && t.id === drag.id) {
         return { ...t, w: Math.max(TILE_MIN.w, t.w + drag.by.x), h: Math.max(TILE_MIN.h, t.h + drag.by.y) };
       }
@@ -493,16 +504,44 @@ export function BlueprintTab({
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? box.clientHeight : 1;
       if (e.ctrlKey) {
+        // A pinch on a trackpad comes as small steps, a mouse wheel as big ones.
+        const d = e.deltaY * unit;
+        const factor = Math.abs(d) < 40 ? Math.exp(-d * 0.01) : d < 0 ? 1.15 : 1 / 1.15;
         const r = box.getBoundingClientRect();
-        zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * unit * 0.002));
+        zoomAt(e.clientX - r.left, e.clientY - r.top, factor);
       } else {
         const dx = (e.shiftKey ? e.deltaY : e.deltaX) * unit;
         const dy = e.shiftKey ? 0 : e.deltaY * unit;
         setView((v) => ({ ...v, x: v.x - dx, y: v.y - dy }));
       }
     };
+    // Pinching on a Mac (Safari's gesture events) zooms the canvas, not the window.
+    let pinched = 1;
+    const onGesture = (e: Event) => {
+      const g = e as Event & { scale: number; clientX: number; clientY: number };
+      e.preventDefault();
+      if (e.type === "gesturestart") pinched = 1;
+      else if (e.type === "gesturechange") {
+        const r = box.getBoundingClientRect();
+        zoomAt(g.clientX - r.left, g.clientY - r.top, g.scale / pinched);
+        pinched = g.scale;
+      }
+    };
+    const gestures = ["gesturestart", "gesturechange", "gestureend"];
     box.addEventListener("wheel", onWheel, { passive: false });
-    return () => box.removeEventListener("wheel", onWheel);
+    for (const g of gestures) box.addEventListener(g, onGesture);
+    // On Linux the app takes the pinch from the system and passes it on.
+    const unlisten = listen<[number, number, number]>("pinch", (e) => {
+      const [factor, x, y] = e.payload;
+      const r = box.getBoundingClientRect();
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+      zoomAt(x - r.left, y - r.top, factor);
+    });
+    return () => {
+      box.removeEventListener("wheel", onWheel);
+      for (const g of gestures) box.removeEventListener(g, onGesture);
+      unlisten.then((f) => f()).catch(() => {});
+    };
   }, [box, zoomAt]);
 
   function onPointerDown(e: React.PointerEvent) {
@@ -613,7 +652,7 @@ export function BlueprintTab({
     for (const [path, at] of Object.entries(layout.lanes)) {
       if (!basePlaced.some((p) => p.lane.names.includes(path))) lanes[path] = at;
     }
-    return { lanes };
+    return { lanes, free: layout.free };
   }
 
   /** Back to songs one under another in order of where they are now; tiles stay. */
@@ -627,7 +666,7 @@ export function BlueprintTab({
     const sorted = [...basePlaced].sort((a, b) => a.origin.y - b.origin.y || a.origin.x - b.origin.x);
     const paths = sorted.map((p) => p.lane.path);
     songs.setOrder([...paths, ...songs.order.filter((p) => !paths.includes(p))]);
-    saveLayout({ lanes: {} });
+    saveLayout({ lanes: {}, free: layout.free });
     fitted.current = false;
     requestAnimationFrame(() => fit());
   }
@@ -637,13 +676,27 @@ export function BlueprintTab({
     if (d.kind === "node") {
       const p = basePlaced.find((x) => x.lane.path === d.lane);
       if (!p) return;
-      // Dropped on a band: the version goes to that branch; anywhere else it goes back.
       const n = p.lane.nodes.find((x) => nodeKey(x) === d.key);
-      if (d.branch === null || n?.kind !== "version") return;
-      if (d.branch === NEW_BRANCH) setNaming({ lane: p.lane, node: n });
-      else moveToBranch(p.lane, n, d.branch);
+      // A version dropped on a band goes into that branch; "+ ветка" makes a new one.
+      if (n?.kind === "version" && d.band !== null) {
+        setFree(p.lane, d.key, null);
+        if (d.band === NEW_BRANCH) setNaming({ lane: p.lane, node: n });
+        else if (d.band !== n.branch) moveToBranch(p.lane, n, d.band);
+        return;
+      }
+      // Back over its lane it goes back in; anywhere else it lies on its own.
+      if (d.band !== null || d.home) {
+        setFree(p.lane, d.key, null);
+        return;
+      }
+      const was = p.at.get(d.key)!;
+      setFree(p.lane, d.key, [snap(p.origin.x + was.x + d.by.x), snap(p.origin.y + was.y + d.by.y)]);
     } else if (d.kind === "lane") {
       saveLayout(pinAll({ lanes: [d.lane], by: d.by }));
+      // What lies on the lane goes with it.
+      if (d.tiles.length) {
+        saveTiles(tiles.map((t) => (d.tiles.includes(t.id) ? { ...t, x: snap(t.x + d.by.x), y: snap(t.y + d.by.y) } : t)));
+      }
     } else if (d.kind === "tile") {
       const ids = [d.id, ...d.tiles];
       saveTiles(tiles.map((t) => (ids.includes(t.id) ? { ...t, x: snap(t.x + d.by.x), y: snap(t.y + d.by.y) } : t)));
@@ -689,21 +742,54 @@ export function BlueprintTab({
     window.addEventListener("pointercancel", onUp);
   }
 
-  /** A version is dragged onto a band of its song: another branch, or a new one. */
+  /**
+   * Any node of a lane can be taken out of it and put anywhere; a version
+   * dropped on a band goes into that branch, and a node dropped back on
+   * its lane goes back in.
+   */
   function dragNode(e: React.PointerEvent, lane: Lane, key: string) {
     const n = lane.nodes.find((x) => nodeKey(x) === key);
-    if (n?.kind !== "version" || n.change === "deleted" || !growing(lane)) return;
+    const sortable = n?.kind === "version" && n.change !== "deleted" && growing(lane);
     beginDrag(e, (by, ev) => {
-      const band = document
-        .elementFromPoint(ev.clientX, ev.clientY)
-        ?.closest<HTMLElement>(`[data-band][data-lane="${CSS.escape(lane.path)}"]`);
-      const branch = band ? (band.dataset.band ?? null) : null;
-      return { kind: "node", lane: lane.path, key, by, branch: branch === n.branch ? null : branch };
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const band = under?.closest<HTMLElement>(`[data-band][data-lane="${CSS.escape(lane.path)}"]`);
+      const home = !!under?.closest(`.bp-lane[data-lane="${CSS.escape(lane.path)}"]`);
+      const name = band?.dataset.band ?? null;
+      // Only versions go to other branches; the rest just goes back in.
+      const target = name === null ? null : sortable || name === (n ? lane.branches[n.row]?.name : null) ? name : null;
+      return { kind: "node", lane: lane.path, key, by, band: target, home };
     });
   }
 
+  /** The song with everything in its lane, and whatever lies on it. */
   function dragLane(e: React.PointerEvent, lane: Lane) {
-    beginDrag(e, (by) => ({ kind: "lane", lane: lane.path, by }));
+    const p = basePlaced.find((x) => x.lane === lane);
+    const on = p ? tiles.filter((t) => t.kind !== "frame" && inside(t, laneRect(p))).map((t) => t.id) : [];
+    beginDrag(e, (by) => ({ kind: "lane", lane: lane.path, by, tiles: on }));
+  }
+
+  /** Takes a node out of its lane to lie at `at`, or (null) puts it back in. */
+  function setFree(lane: Lane, key: string, at: [number, number] | null) {
+    const own = { ...(lane.names.map((n) => layout.free[n]).find((m) => m !== undefined) ?? {}) };
+    if (at) own[key] = at;
+    else if (own[key] === undefined) return;
+    else delete own[key];
+    const free = { ...layout.free };
+    for (const n of lane.names) delete free[n];
+    if (Object.keys(own).length) free[lane.path] = own;
+    saveLayout({ ...pinAll(), free });
+  }
+
+  const isFree = (lane: Lane, key: string) => !!basePlaced.find((p) => p.lane === lane)?.free.has(key);
+  /** "Back into the lane" for a node taken out of it. */
+  const backIn = (lane: Lane, key: string): MenuItem[] =>
+    isFree(lane, key) ? [{ label: "Вернуть в дорожку", icon: "undo", run: () => setFree(lane, key, null) }] : [];
+
+  /** Every node of the lane back in it. */
+  function gather(lane: Lane) {
+    const free = { ...layout.free };
+    for (const n of lane.names) delete free[n];
+    saveLayout({ ...pinAll(), free });
   }
 
   function dragTile(e: React.PointerEvent, tile: Tile) {
@@ -878,7 +964,7 @@ export function BlueprintTab({
   }
 
   function versionMenu(lane: Lane, n: SongVersion): MenuItem[] {
-    const items: MenuItem[] = [];
+    const items: MenuItem[] = backIn(lane, n.key);
     const usable = n.change !== "deleted" && !n.pruned;
     const kind = previewKind(n.path);
     const prev = previousVersion(lane, n);
@@ -951,6 +1037,7 @@ export function BlueprintTab({
     const kind = previewKind(w.path);
     const items: MenuItem[] = [
       { label: "Описать и сохранить…", icon: "check", run: () => select(lane.path, w.key, true) },
+      ...backIn(lane, "work"),
     ];
     if (w.status !== "deleted" && kind) {
       items.push({ label: kind === "audio" ? "Слушать" : "Открыть", icon: "play", run: () => player.open([nowTrack(w.path)]) });
@@ -982,7 +1069,7 @@ export function BlueprintTab({
     const activeHead = lane.nodes.find(
       (n): n is SongVersion => n.kind === "version" && n.key === lane.branches.find((x) => x.active)?.head,
     );
-    const items: MenuItem[] = [];
+    const items: MenuItem[] = backIn(lane, branchKey(b.name));
     if (usable && !b.active && growing(lane)) {
       items.push({ label: "Положить в папку", icon: "restore", run: () => songs.intoFolder(lane, head) });
     }
@@ -1013,6 +1100,9 @@ export function BlueprintTab({
 
   function laneMenu(lane: Lane): MenuItem[] {
     const items: MenuItem[] = [];
+    if (basePlaced.find((p) => p.lane === lane)?.free.size) {
+      items.push({ label: "Собрать узлы в дорожку", icon: "undo", run: () => gather(lane) });
+    }
     if (lane.status !== "elsewhere") {
       items.push({ label: "Открыть во вкладке «Файлы»", icon: "doc", run: () => onOpenFile(lane.path) });
     }
@@ -1205,8 +1295,9 @@ export function BlueprintTab({
               "Тащите полотно мышью (или средней кнопкой)\n" +
               "Колесо — прокрутка, Shift + колесо — вбок\n" +
               "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё, Ctrl+F — найти, Ctrl+Z — отменить\n" +
-              "Узлы, заголовки песен, заметки и рамки тащатся куда угодно\n" +
-              "Версию можно бросить на другую ветку — она перенесётся туда\n" +
+              "Любой узел можно вытащить из дорожки и поставить куда угодно; брошенный обратно на дорожку, он вернётся\n" +
+              "Версию, брошенную на полосу ветки, — в эту ветку; на «＋ ветка» — в новую\n" +
+              "Песню целиком двигает заголовок её рамки, вместе с заметками на ней\n" +
               "Правая кнопка — действия, на пустом месте — новые тайлы"
             }
           >
@@ -1274,7 +1365,7 @@ export function BlueprintTab({
                 tagsOf={tagsOf}
                 selectedKey={selected?.path === p.lane.path ? (selected.key ?? "") : null}
                 dim={!!matched && !matched.has(p.lane.path)}
-                target={drag?.kind === "node" && drag.lane === p.lane.path ? drag.branch : null}
+                target={drag?.kind === "node" && drag.lane === p.lane.path ? drag.band : null}
                 flash={flash}
                 dragging={
                   drag?.kind === "node" && drag.lane === p.lane.path
@@ -1597,6 +1688,7 @@ const LaneView = memo(function LaneView({
   return (
     <div
       ref={el}
+      data-lane={lane.path}
       className={[
         "bp-lane",
         `lane-${lane.status}`,
@@ -1627,14 +1719,15 @@ const LaneView = memo(function LaneView({
       </div>
 
       {lane.branches.map((b) => {
-        const p = pos(branchKey(b.name));
+        const band = bandRect(b.row);
+        const left = band.x - frame.x;
         return (
           <div
             key={b.name}
             data-band={b.name}
             data-lane={lane.path}
             className={`bp-band ${b.active ? "active" : ""} ${target === b.name ? "target" : ""}`}
-            style={{ left: p.x - 10, top: p.y - 9, width: frame.w - p.x - LANE_PAD / 2, height: NODE_H + 18 }}
+            style={{ left, top: band.y - frame.y, width: frame.w - left - LANE_PAD / 2, height: band.h }}
           >
             {target === b.name && <span className="bp-band-hint">в ветку «{b.name}»</span>}
           </div>
@@ -1650,9 +1743,9 @@ const LaneView = memo(function LaneView({
       </svg>
 
       <div
-        className={`bp-node bp-song ${muted ? "muted" : ""} ${selectedKey === "" ? "selected" : ""}`}
+        className={`bp-node bp-song ${muted ? "muted" : ""} ${selectedKey === "" ? "selected" : ""} ${dragging === SONG_KEY ? "dragging" : ""}`}
         style={box(SONG_KEY)}
-        onPointerDown={(e) => act.current.dragLane(e, lane)}
+        onPointerDown={(e) => act.current.dragNode(e, lane, SONG_KEY)}
         onClick={() => act.current.select(lane.path, null)}
         onContextMenu={(e) => act.current.songMenu(e, lane)}
       >
@@ -1693,8 +1786,9 @@ const LaneView = memo(function LaneView({
         return (
           <div
             key={branchKey(b.name)}
-            className={`bp-node bp-branch-node ${b.active ? "active" : ""}`}
+            className={`bp-node bp-branch-node ${b.active ? "active" : ""} ${dragging === branchKey(b.name) ? "dragging" : ""}`}
             style={box(branchKey(b.name))}
+            onPointerDown={(e) => act.current.dragNode(e, lane, branchKey(b.name))}
             onClick={() => act.current.select(lane.path, null)}
             onContextMenu={(e) => act.current.branchMenu(e, lane, b)}
             title={`Ветка «${b.name}» трека «${name}»${b.active ? ", она в папке" : ""}`}
@@ -1789,7 +1883,8 @@ const LaneView = memo(function LaneView({
             <div
               key={n.key}
               style={style}
-              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""}`}
+              onPointerDown={(e) => act.current.dragNode(e, lane, key)}
+              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""} ${dragging === key ? "dragging" : ""}`}
               onClick={() => act.current.select(lane.path, n.key, true)}
               onContextMenu={(e) => act.current.workMenu(e, lane, n)}
               title="Файл в папке сейчас: щёлкните, чтобы описать и сохранить"

@@ -4403,6 +4403,7 @@ dependencies = [
 name = "takes-desktop"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "keyring",
  "notify",
  "serde",
@@ -4413,6 +4414,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "webkit2gtk",
 ]
 
 [[package]]

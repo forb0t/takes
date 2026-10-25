@@ -18,3 +18,8 @@ takes-core = { version = "0.1.0", path = "../../../crates/takes-core" }
 tauri = { version = "2.12.1", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.8.1"
 tauri-plugin-opener = "2.7.0"
+
+# A trackpad pinch is taken from GTK before WebKit zooms the whole window.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"
+webkit2gtk = "2.0.2"

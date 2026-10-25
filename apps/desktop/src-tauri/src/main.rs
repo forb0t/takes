@@ -2,6 +2,7 @@
 
 mod commands;
 mod dto;
+mod pinch;
 mod sync;
 mod watcher;
 
@@ -12,6 +13,12 @@ fn main() {
         .manage(commands::ProjectList::default())
         .manage(watcher::WatchState::default())
         .manage(sync::Syncing::default())
+        .setup(|app| {
+            if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                pinch::forward(&window);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::is_project,
