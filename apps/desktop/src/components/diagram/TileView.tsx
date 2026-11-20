@@ -143,13 +143,26 @@ export function TileView({
   return (
     <div
       {...common}
-      className={`bp-node bp-note ${selected ? "selected" : ""} ${dim ? "dim" : ""}`}
+      className={`bp-node bp-note ${tile.task ? "task" : ""} ${tile.done ? "done" : ""} ${selected ? "selected" : ""} ${dim ? "dim" : ""}`}
       onPointerDown={(e) => act.current.dragTile(e, tile)}
     >
       <div className="bp-node-head">
-        <Icon name="comment" size={12} />
+        {tile.task ? (
+          <input
+            type="checkbox"
+            className="bp-task-check"
+            checked={!!tile.done}
+            title={tile.done ? "Сделано" : "Отметить сделанным"}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => act.current.updateTile(tile.id, { done: !tile.done || undefined })}
+          />
+        ) : (
+          <Icon name="comment" size={12} />
+        )}
         {titleField}
       </div>
+      <ExecPin side="out" on={!!tile.links?.length} onPull={(e) => act.current.pullNote(e, tile)} />
       {body}
       {resize}
     </div>

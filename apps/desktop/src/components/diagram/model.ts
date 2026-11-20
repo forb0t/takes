@@ -50,7 +50,15 @@ export interface Tile {
   text: string;
   /** A hue, 0–360. */
   color: number;
+  /** A note's wires: the songs and versions it is about. */
+  links?: TileLink[];
+  /** A note that is a task, done or not. */
+  task?: boolean;
+  done?: boolean;
 }
+
+/** What a note is tied to: a song (by its id, kept across renames) or one of its versions (short id). */
+export type TileLink = { song: string; version?: string };
 
 export const TILE_NEW: Record<Tile["kind"], Pick<Tile, "w" | "h" | "title" | "color">> = {
   note: { w: 256, h: 160, title: "Заметка", color: 48 },
@@ -169,6 +177,8 @@ export interface Actions {
   breakWire: (lane: Lane, w: Wire) => void;
   /** Shift + click on a version or the file on disk: marks it (or no longer) for an A/B comparison. */
   mark: (lane: Lane, key: string) => void;
+  /** Pulls a wire from a note to a song or a version; with Alt, unties the note. */
+  pullNote: (e: React.PointerEvent, tile: Tile) => void;
 }
 
 /** A node marked for an A/B comparison: song (path) and node key. */
@@ -215,15 +225,27 @@ export function parseTiles(value: string | null): Tile[] {
   try {
     const list: unknown = JSON.parse(value ?? "[]");
     if (!Array.isArray(list)) return [];
-    return list.filter(
-      (t): t is Tile =>
-        !!t &&
-        typeof t.id === "string" &&
-        ["note", "song", "frame"].includes(t.kind) &&
-        [t.x, t.y, t.w, t.h, t.color].every(Number.isFinite) &&
-        typeof t.title === "string" &&
-        typeof t.text === "string",
-    );
+    return list
+      .filter(
+        (t): t is Tile =>
+          !!t &&
+          typeof t.id === "string" &&
+          ["note", "song", "frame"].includes(t.kind) &&
+          [t.x, t.y, t.w, t.h, t.color].every(Number.isFinite) &&
+          typeof t.title === "string" &&
+          typeof t.text === "string",
+      )
+      .map((t) => {
+        const links = Array.isArray(t.links)
+          ? t.links.filter(
+              (l: unknown): l is TileLink =>
+                !!l &&
+                typeof (l as TileLink).song === "string" &&
+                ["string", "undefined"].includes(typeof (l as TileLink).version),
+            )
+          : [];
+        return { ...t, links: links.length ? links : undefined, task: t.task === true || undefined, done: t.done === true || undefined };
+      });
   } catch {
     return [];
   }

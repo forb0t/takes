@@ -15,7 +15,9 @@ import {
   nodeSize,
   placeLanes,
   previousVersion,
+  shortId,
   songHue,
+  wire,
   type Lane,
   type LaneNode,
   type Layout,
@@ -61,6 +63,7 @@ import {
   type Pull,
   type Selection,
   type Tile,
+  type TileLink,
   type Wire,
   type WireEnd,
 } from "./diagram/model";
@@ -125,6 +128,15 @@ export function BlueprintTab({
   } | null>(null);
   /** A wire being pulled. */
   const [pull, setPull] = useState<Pull | null>(null);
+  /** A wire being pulled from a note: where to, and what letting go there does. */
+  const [noteWire, setNoteWire] = useState<{
+    from: Point;
+    at: Point;
+    screen: Point;
+    target: WireEnd | null;
+    ok: boolean;
+    hint: string;
+  } | null>(null);
   const [selected, setSelected] = useState<Selection | null>(null);
   const [selectedTile, setSelectedTile] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -152,6 +164,9 @@ export function BlueprintTab({
   }, [marked]);
   const [drag, setDrag] = useState<Drag | null>(null);
   const lanes = songs.lanes;
+  /** The songs as last built, for a wire pulled meanwhile. */
+  const lanesNow = useRef(lanes);
+  lanesNow.current = lanes;
 
   const visible = useMemo(
     () => lanes?.filter((l) => showRemoved || l.status !== "removed") ?? [],
@@ -754,6 +769,122 @@ export function BlueprintTab({
     beginDrag(e, (by) => ({ kind: "size", id: tile.id, by }));
   }
 
+  // ---- notes wired to songs ------------------------------------------------------
+
+  /** The song (and version) a note's wire goes to, as drawn now. */
+  function linkTarget(link: TileLink) {
+    const p = placed.find((x) => x.lane.id === link.song);
+    if (!p) return null;
+    const v = link.version
+      ? p.lane.nodes.find((n): n is SongVersion => n.kind === "version" && shortId(n.version.id) === link.version)
+      : undefined;
+    return { lane: p.lane, version: v ?? null };
+  }
+
+  /**
+   * A note's wire to the version (or the song, when the version is not drawn):
+   * from its right into the node's left, or, for a node left of the note, from
+   * its left into the node's right, so it never loops around either.
+   */
+  function noteWirePath(tile: Tile, link: TileLink): string | null {
+    const t = linkTarget(link);
+    if (!t) return null;
+    const key = t.version?.key ?? SONG_KEY;
+    const into = pinAt(t.lane.path, key, "in");
+    const out = pinAt(t.lane.path, key, "out");
+    if (!into || !out) return null;
+    const y = tile.y + PIN_Y;
+    if (out.x < tile.x) {
+      const x = tile.x + 6;
+      const bend = Math.max(32, (x - out.x) / 2);
+      return `M ${x} ${y} C ${x - bend} ${y}, ${out.x + bend} ${out.y}, ${out.x} ${out.y}`;
+    }
+    return wire(tile.x + tile.w - 6, y, into.x, into.y);
+  }
+
+  function linkName(link: TileLink): string {
+    const t = linkTarget(link);
+    if (!t) return "песня не на схеме";
+    return t.version ? `${songName(t.lane)}, ${versionName(t.version)}` : songName(t.lane);
+  }
+
+  function untie(tile: Tile, link: TileLink) {
+    const left = (tile.links ?? []).filter((l) => !(l.song === link.song && l.version === link.version));
+    updateTile(tile.id, { links: left.length ? left : undefined });
+  }
+
+  /** A wire from a note: let go on a song's node or a version, the note is tied to it. */
+  function pullNote(e: React.PointerEvent, tile: Tile) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    if (e.altKey) {
+      if (tile.links?.length) updateTile(tile.id, { links: undefined });
+      return;
+    }
+    suppressClick.current = false;
+    const start = { x: e.clientX, y: e.clientY };
+    const from = { x: tile.x + tile.w - 6, y: tile.y + PIN_Y };
+    let last: { link: TileLink | null; moved: boolean } = { link: null, moved: false };
+    const plan = (target: WireEnd | null): { ok: boolean; hint: string; link: TileLink | null } => {
+      const lane = target && lanesNow.current?.find((l) => l.path === target.lane);
+      if (!target || !lane) return { ok: false, hint: "", link: null };
+      const n = target.key === SONG_KEY ? null : lane.nodes.find((x) => x.key === target.key);
+      if (target.key !== SONG_KEY && n?.kind !== "version") {
+        return { ok: false, hint: "Заметку можно привязать к песне или к её версии", link: null };
+      }
+      const link: TileLink = n?.kind === "version" ? { song: lane.id, version: shortId(n.version.id) } : { song: lane.id };
+      const now = tilesNow.current.find((t) => t.id === tile.id);
+      if (now?.links?.some((l) => l.song === link.song && l.version === link.version)) {
+        return { ok: false, hint: "Уже привязана сюда", link: null };
+      }
+      const what = n?.kind === "version" ? `${songName(lane)}, ${versionName(n)}` : songName(lane);
+      return { ok: true, hint: `Привязать к «${what}»`, link };
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!last.moved && Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) <= 4) return;
+      if (!last.moved) noSelecting(true);
+      suppressClick.current = true;
+      const now = wiresNow.current;
+      const target = now.endAt(ev.clientX, ev.clientY, "in");
+      const { ok, hint, link } = plan(target);
+      last = { link: ok ? link : null, moved: true };
+      const r = box?.getBoundingClientRect() ?? { left: 0, top: 0 };
+      setNoteWire({
+        from,
+        at: now.toCanvas(ev.clientX, ev.clientY),
+        screen: { x: ev.clientX - r.left, y: ev.clientY - r.top },
+        target,
+        ok,
+        hint,
+      });
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", stop);
+      window.removeEventListener("keydown", onKey, true);
+      noSelecting(false);
+      setNoteWire(null);
+    };
+    const onUp = () => {
+      stop();
+      const link = last.link;
+      if (!link) return;
+      const now = tilesNow.current.find((t) => t.id === tile.id);
+      if (now) updateTile(tile.id, { links: [...(now.links ?? []), link] });
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.stopPropagation();
+      last = { link: null, moved: false };
+      stop();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", stop);
+    window.addEventListener("keydown", onKey, true);
+  }
+
   // ---- tiles --------------------------------------------------------------------
 
   function addTile(kind: Tile["kind"], at: Point) {
@@ -1182,6 +1313,16 @@ export function BlueprintTab({
     const items: MenuItem[] = [];
     if (tile.kind === "song") items.push({ label: "Выбрать файл…", icon: "folder", run: () => fillTile(tile) });
     items.push({ label: "Изменить", icon: "edit", run: () => setEditing(tile.id) });
+    if (tile.kind === "note") {
+      items.push(
+        tile.task
+          ? { label: "Сделать обычной заметкой", icon: "comment", run: () => updateTile(tile.id, { task: undefined, done: undefined }) }
+          : { label: "Сделать задачей", icon: "check", run: () => updateTile(tile.id, { task: true }) },
+      );
+      for (const link of tile.links ?? []) {
+        items.push({ label: `Отвязать от «${linkName(link)}»`, icon: "close", run: () => untie(tile, link) });
+      }
+    }
     for (const [name, hue] of COLORS) {
       if (hue !== tile.color) items.push({ label: `Цвет: ${name.toLowerCase()}`, icon: "label", run: () => updateTile(tile.id, { color: hue }) });
     }
@@ -1233,6 +1374,7 @@ export function BlueprintTab({
     grabWire,
     breakWire,
     mark,
+    pullNote,
   };
 
   // ---- drawing ------------------------------------------------------------------
@@ -1412,7 +1554,7 @@ export function BlueprintTab({
 
         <div
           ref={setBox}
-          className={`bp ${panning ? "panning" : ""} ${drag ? "dragging" : ""} ${pull ? "wiring" : ""}`}
+          className={`bp ${panning ? "panning" : ""} ${drag ? "dragging" : ""} ${pull || noteWire ? "wiring" : ""}`}
           style={gridStyle}
           {...look.panHandlers}
           onClickCapture={(e) => {
@@ -1455,7 +1597,13 @@ export function BlueprintTab({
                 hits={hits.get(p.lane.path) ?? null}
                 hitNow={hitNow?.lane === p.lane.path ? hitNow.key : null}
                 marks={marksByLane.get(p.lane.path) ?? null}
-                pullAt={pull?.target?.lane === p.lane.path ? `${pull.ok ? "ok" : "bad"}:${pull.target.key}` : null}
+                pullAt={
+                  pull?.target?.lane === p.lane.path
+                    ? `${pull.ok ? "ok" : "bad"}:${pull.target.key}`
+                    : noteWire?.target?.lane === p.lane.path
+                      ? `${noteWire.ok ? "ok" : "bad"}:${noteWire.target.key}`
+                      : null
+                }
                 pullWire={
                   pull?.moving && pull.fixed.lane === p.lane.path ? `${pull.moving.from}>${pull.moving.to}` : null
                 }
@@ -1470,6 +1618,32 @@ export function BlueprintTab({
                 act={act}
               />
             ))}
+            <svg className="bp-wires bp-note-wires" width="1" height="1">
+              {shownTiles.flatMap((t) =>
+                (t.links ?? []).flatMap((link) => {
+                  const d = noteWirePath(t, link);
+                  if (!d) return [];
+                  return [
+                    <g
+                      key={`${t.id}>${link.song}:${link.version ?? ""}`}
+                      className={`bp-wire-g note ${matched && !matched.has(t.id) ? "dim" : ""}`}
+                    >
+                      <path
+                        d={d}
+                        className="bp-wire-hit"
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          untie(t, link);
+                        }}
+                      >
+                        <title>{`«${t.title}» → ${linkName(link)}\nДвойной щелчок — отвязать`}</title>
+                      </path>
+                      <path d={d} className="bp-wire note" style={{ stroke: `hsl(${t.color} 65% 62%)` }} />
+                    </g>,
+                  ];
+                }),
+              )}
+            </svg>
             {shownTiles
               .filter((t) => t.kind !== "frame")
               .map((t) => (
@@ -1483,7 +1657,23 @@ export function BlueprintTab({
                 />
               ))}
             {pull && <LiveWire pull={pull} pinAt={pinAt} />}
+            {noteWire && (
+              <svg className="bp-live" width="1" height="1">
+                <path
+                  d={wire(noteWire.from.x, noteWire.from.y, noteWire.at.x, noteWire.at.y)}
+                  className={`bp-wire live ${noteWire.target && !noteWire.ok ? "bad" : ""}`}
+                />
+              </svg>
+            )}
           </div>
+          {noteWire?.hint && (
+            <div
+              className={`bp-pull-hint ${noteWire.ok ? "" : "bad"}`}
+              style={{ left: noteWire.screen.x + 18, top: noteWire.screen.y + 14 }}
+            >
+              {noteWire.hint}
+            </div>
+          )}
           {pull?.hint && (
             <div
               className={`bp-pull-hint ${pull.ok ? "" : "bad"}`}

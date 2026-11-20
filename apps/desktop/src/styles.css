@@ -3544,3 +3544,33 @@ input[type="checkbox"]:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- notes wired to songs, tasks ------------------------------------------------ */
+
+.bp-wire.note {
+  stroke-width: 2;
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+}
+
+.bp-wire-g.note:hover .bp-wire {
+  stroke-width: 3.4;
+}
+
+.bp-wire-g.note.dim {
+  opacity: 0.25;
+}
+
+.bp-task-check {
+  flex: none;
+  margin: 0;
+}
+
+.bp-note.done .bp-title {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.bp-note.done .bp-tile-body {
+  opacity: 0.55;
+}
