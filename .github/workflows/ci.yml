@@ -34,12 +34,13 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      # The desktop crate embeds the built frontend, so build it first.
+      # The desktop crate embeds the built frontend, so build (and test) it first.
       - name: Build frontend
         working-directory: apps/desktop
         run: |
           npm ci
           npm run build
+          npm test
 
       - name: Test
         run: cargo test --workspace
