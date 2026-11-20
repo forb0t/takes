@@ -1279,3 +1279,124 @@ fn branches_cannot_take_the_names_of_takes() {
         Err(Error::InvalidName(_))
     ));
 }
+
+fn takes_of(repo: &Repo) -> Vec<String> {
+    repo.branches()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .filter(|n| n.starts_with(TAKE_PREFIX))
+        .collect()
+}
+
+#[test]
+fn dropping_a_songs_takes_frees_them() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", noise(300_000, 1));
+    write(&repo, "other.wav", "other");
+    repo.commit("v1", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let bounce = outside.path().join("acoustic.wav");
+    fs::write(&bounce, noise(300_000, 4)).unwrap();
+    let first = repo
+        .save_take(TakeFrom::Outside(&bounce), "song.wav", "HEAD", "acoustic")
+        .unwrap();
+    fs::write(&bounce, noise(300_000, 6)).unwrap();
+    let second = repo
+        .save_take(
+            TakeFrom::Outside(&bounce),
+            "song.wav",
+            &first.to_hex(),
+            "acoustic 2",
+        )
+        .unwrap();
+    assert_eq!(takes_of(&repo).len(), 1);
+    let drop: std::collections::HashSet<_> = [first, second].into();
+    let names = ["song.wav".to_owned()];
+
+    let plan = repo.drop_versions(&drop, &names, true).unwrap();
+    assert_eq!(plan.versions, 2);
+    assert!(plan.bytes >= 2 * 300_000, "{plan:?}");
+    assert_eq!(takes_of(&repo).len(), 1, "a dry run changes nothing");
+
+    assert_eq!(repo.drop_versions(&drop, &names, false).unwrap(), plan);
+    assert!(takes_of(&repo).is_empty());
+    let left: Vec<_> = repo
+        .all_versions()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(!left.contains(&first) && !left.contains(&second));
+    // The folder and its history stay as they were.
+    assert_eq!(read(&repo, "song.wav"), noise(300_000, 1));
+    assert!(changes(&repo).is_empty());
+    assert_eq!(saved(&repo, "HEAD", "song.wav").unwrap(), noise(300_000, 1));
+}
+
+#[test]
+fn dropping_some_versions_keeps_the_rest_of_their_take() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "v1");
+    write(&repo, "other.wav", "other");
+    repo.commit("v1", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let bounce = outside.path().join("take.wav");
+    fs::write(&bounce, "kept").unwrap();
+    let kept = repo
+        .save_take(TakeFrom::Outside(&bounce), "song.wav", "HEAD", "kept")
+        .unwrap();
+    fs::write(&bounce, "dropped").unwrap();
+    let dropped = repo
+        .save_take(
+            TakeFrom::Outside(&bounce),
+            "song.wav",
+            &kept.to_hex(),
+            "dropped",
+        )
+        .unwrap();
+    let drop: std::collections::HashSet<_> = [dropped].into();
+    let report = repo
+        .drop_versions(&drop, &["song.wav".to_owned()], false)
+        .unwrap();
+    // The take stays for the version still wanted; the other one loses its file only.
+    assert_eq!(report.versions, 0);
+    assert_eq!(report.contents, 1);
+    assert_eq!(takes_of(&repo).len(), 1);
+    assert_eq!(saved(&repo, &kept.to_hex(), "song.wav").unwrap(), b"kept");
+    assert!(saved(&repo, &dropped.to_hex(), "song.wav").is_none());
+    // Other files in it are not the song's: they stay.
+    assert_eq!(
+        saved(&repo, &dropped.to_hex(), "other.wav").unwrap(),
+        b"other"
+    );
+}
+
+#[test]
+fn dropping_versions_of_the_folders_history_keeps_what_is_needed() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "song.wav", "old mix");
+    repo.commit("v1", &[]).unwrap();
+    let old = repo.resolve("HEAD").unwrap();
+    write(&repo, "song.wav", "tagged mix");
+    repo.commit("v2", &[]).unwrap();
+    let tagged = repo.resolve("HEAD").unwrap();
+    repo.create_tag("sent", "HEAD").unwrap();
+    write(&repo, "song.wav", "new mix");
+    repo.commit("v3", &[]).unwrap();
+    let now = repo.resolve("HEAD").unwrap();
+    let drop: std::collections::HashSet<_> = [old, tagged, now].into();
+    let report = repo
+        .drop_versions(&drop, &["song.wav".to_owned()], false)
+        .unwrap();
+    // In the history still, without the file; never the tagged one or the folder's.
+    assert_eq!(report.versions, 0);
+    assert_eq!(report.contents, 1);
+    assert!(saved(&repo, &old.to_hex(), "song.wav").is_none());
+    assert_eq!(
+        saved(&repo, &tagged.to_hex(), "song.wav").unwrap(),
+        b"tagged mix"
+    );
+    assert_eq!(saved(&repo, "HEAD", "song.wav").unwrap(), b"new mix");
+    assert_eq!(repo.log(None).unwrap().len(), 3);
+}

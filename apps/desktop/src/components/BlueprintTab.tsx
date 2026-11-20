@@ -1057,6 +1057,10 @@ export function BlueprintTab({
         },
       });
     }
+    if (!b.active && growing(lane)) {
+      // Not a step to take back: the space it took is freed.
+      items.push({ label: "Удалить ветку…", icon: "trash", danger: true, run: () => songs.deleteBranch(lane, b.name) });
+    }
     return items;
   }
 

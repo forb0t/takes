@@ -414,6 +414,27 @@ pub async fn cleanup(
     .await
 }
 
+/// Deletes versions of a song (short ids; `paths`: every name it had), as
+/// the app does with a song's branch, freeing the space they take.
+#[tauri::command]
+pub async fn drop_versions(
+    root: String,
+    versions: Vec<String>,
+    paths: Vec<String>,
+    dry_run: bool,
+) -> CmdResult<CleanupDto> {
+    blocking(move || {
+        let mut repo = open(&root)?;
+        // Versions gone already (cleaned up before) have nothing left to free.
+        let versions = versions
+            .iter()
+            .filter_map(|id| repo.resolve(id).ok())
+            .collect::<HashSet<_>>();
+        Ok(repo.drop_versions(&versions, &paths, dry_run)?.into())
+    })
+    .await
+}
+
 /// Packs a version into a ZIP (e.g. a release for a label).
 #[tauri::command]
 pub async fn export_zip(root: String, rev: String, dest: String) -> CmdResult<u64> {

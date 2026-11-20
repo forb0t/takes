@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { GraphVersion } from "./api";
 import type { ProjectFile } from "./components/FilesTab";
-import { MAIN_BRANCH, branchKey, buildLanes, shortId, songId, type Lane, type SongLinks, type SongVersion } from "./blueprint";
-import { connect, follow, follows, joinBranch, keepSaved, moveOne, renameBranch, unplug } from "./wiring";
+import { DROPPED, MAIN_BRANCH, branchKey, buildLanes, shortId, songId, type Lane, type SongLinks, type SongVersion } from "./blueprint";
+import { connect, dropBranch, follow, follows, joinBranch, keepSaved, moveOne, renameBranch, unplug } from "./wiring";
 
 const PATH = "song.wav";
 const id = (n: number) => n.toString(16).padStart(2, "0").repeat(32);
@@ -210,5 +210,29 @@ describe("wiring", () => {
     const kept = keepSaved(withAcoustic(), before);
     expect(kept[sid(3)]).toBe(branchKey(ACOUSTIC));
     expect(wires(laneOf(history(3), kept))).toEqual({ [MAIN_BRANCH]: [1, 2], [ACOUSTIC]: [3] });
+  });
+});
+
+describe("deleting a branch", () => {
+  it("leaves its versions out, keeping the numbers of the others", () => {
+    const lane = withAcoustic(4);
+    const links = dropBranch(lane, ACOUSTIC);
+    expect(links[sid(3)]).toBe(DROPPED);
+    // Version 4, saved after 3, went on in its branch: it goes too.
+    expect(links[sid(4)]).toBe(DROPPED);
+    const left = laneOf(history(4), { ...links, [sid(4)]: sid(2) });
+    expect(wires(left)).toEqual({ [MAIN_BRANCH]: [1, 2, 4] });
+    expect(left.branches.map((b) => b.name)).toEqual([MAIN_BRANCH]);
+    expect(left.versions).toBe(3);
+    // Kept as deleted, also when the song is rewired later.
+    expect(left.links[sid(3)]).toBe(DROPPED);
+    expect(unplug(left, key(4))[sid(3)]).toBe(DROPPED);
+    expect(wires(laneOf(history(4), links))).toEqual({ [MAIN_BRANCH]: [1, 2] });
+  });
+
+  it("never brings deleted versions back with a step back", () => {
+    const before = withAcoustic().links;
+    const now = laneOf(history(3), dropBranch(withAcoustic(), ACOUSTIC));
+    expect(keepSaved(now, before)[sid(3)]).toBe(DROPPED);
   });
 });

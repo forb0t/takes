@@ -5,7 +5,7 @@
  * it; plugged in where something follows already, a version goes in
  * between. Every function gives the song's whole wiring anew.
  */
-import { BRANCH_PREFIX, branchKey, sidOf, type Lane, type SongLinks, type SongVersion } from "./blueprint";
+import { BRANCH_PREFIX, DROPPED, branchKey, sidOf, type Lane, type SongLinks, type SongVersion } from "./blueprint";
 
 /** What a wire starts from: a version (its node's key) or a branch's node (`branchKey`). */
 export type Anchor = string;
@@ -108,6 +108,13 @@ export function joinBranch(lane: Lane, from: string, into: string): SongLinks {
   return { ...lane.links, [first]: lastOn(lane.links, branchKey(into)) };
 }
 
+/** The wiring with every version of `branch` deleted (see `DROPPED`). */
+export function dropBranch(lane: Lane, branch: string): SongLinks {
+  const links = { ...lane.links };
+  for (const [sid, name] of Object.entries(lane.branchOf)) if (name === branch) links[sid] = DROPPED;
+  return links;
+}
+
 export function renameBranch(lane: Lane, from: string, to: string): SongLinks {
   const links: SongLinks = {};
   for (const [sid, ref] of Object.entries(lane.links)) links[sid] = ref === branchKey(from) ? branchKey(to) : ref;
@@ -122,6 +129,8 @@ export function renameBranch(lane: Lane, from: string, to: string): SongLinks {
  */
 export function keepSaved(lane: Lane, links: SongLinks): SongLinks {
   const next = { ...links };
+  // Deleted versions stay deleted.
+  for (const [sid, ref] of Object.entries(lane.links)) if (ref === DROPPED) next[sid] = DROPPED;
   const after = followers(lane.links);
   for (const name of new Set(Object.values(lane.branchOf))) {
     if (!name) continue;

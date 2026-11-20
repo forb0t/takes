@@ -291,6 +291,8 @@ export const shortId = (id: string) => id.slice(0, 16);
 export const sidOf = (key: string) => shortId(key.slice(0, key.indexOf(":")));
 /** Where a song's wiring is kept, as a shared setting. */
 export const SONG_BRANCHES = "track.";
+/** What a deleted version (of a branch deleted with it) "follows": it is not drawn. */
+export const DROPPED = "-";
 
 function fnv(text: string, seed: number): string {
   let h = seed;
@@ -448,16 +450,22 @@ export function buildLanes(
   };
 
   const lanes: Lane[] = [];
-  for (const { names, list } of groups.values()) {
+  for (const { names, list: every } of groups.values()) {
     // Named as the file is now, else as its latest version.
     const file = [...names].map((n) => fileByPath.get(n)).find((f) => f !== undefined);
-    const path = file?.path ?? list[list.length - 1].path;
+    const path = file?.path ?? every[every.length - 1].path;
 
-    const id = songId(list[0]?.path ?? path);
+    const id = songId(every[0]?.path ?? path);
     const kept = wiring.get(id) ?? { links: {}, branches: {} };
 
-    let n = 0;
-    for (const node of list) if (node.change !== "deleted") node.number = ++n;
+    // Numbers stay as they were when versions are deleted.
+    let number = 0;
+    for (const node of every) if (node.change !== "deleted") node.number = ++number;
+    const sid = (node: SongVersion) => shortId(node.version.id);
+    const list = every.filter((node) => kept.links[sid(node)] !== DROPPED);
+    const dropped = every.filter((node) => kept.links[sid(node)] === DROPPED).map(sid);
+    if (!list.length && !file && dropped.length) continue;
+    const n = list.filter((node) => node.change !== "deleted").length;
 
     // The project branch each version is on.
     const owned = new Set<string>();
@@ -479,7 +487,6 @@ export function buildLanes(
     // before songs were wired) the end of the wire the version it was made
     // from is on, or of the branch it was kept in, or of an old project
     // branch it is on.
-    const sid = (node: SongVersion) => shortId(node.version.id);
     const bySid = new Map<string, SongVersion>();
     for (const node of list) if (!bySid.has(sid(node))) bySid.set(sid(node), node);
     const inLane = new Set(list.map((node) => node.key));
@@ -583,7 +590,7 @@ export function buildLanes(
 
     // The branch in the folder: the one its version is wired into ("" when unplugged).
     const tip = tipsAt(current?.head, names).map(seen);
-    const inFolder = tip.map((k) => nodes.get(k)!).find((node) => node.change !== "deleted");
+    const inFolder = tip.map((k) => nodes.get(k)!).find((node) => node.change !== "deleted" && inLane.has(node.key));
     const active = inFolder?.branch ?? (list.length ? list[list.length - 1].branch : MAIN_BRANCH);
     if (inFolder) inFolder.inFolder = file?.status === "saved";
 
@@ -658,6 +665,7 @@ export function buildLanes(
       links[sid(node)] = p === "" || p.startsWith(BRANCH_PREFIX) ? p : sid(nodes.get(p)!);
       branchOf[sid(node)] = node.branch;
     }
+    for (const v of dropped) links[v] = DROPPED;
     const rows = rowNames.length + (looseRow !== null ? 1 : 0);
 
     lanes.push({

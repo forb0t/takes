@@ -40,6 +40,7 @@ fn main() {
             commands::file_history,
             commands::stats,
             commands::cleanup,
+            commands::drop_versions,
             commands::export_zip,
             commands::set_author,
             commands::switch_branch,

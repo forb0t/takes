@@ -276,6 +276,9 @@ export const api = {
   stats: (root: string) => invoke<Stats>("stats", { root }),
   cleanup: (root: string, olderThanDays: number | null, dryRun: boolean, keep: string[]) =>
     invoke<Cleanup>("cleanup", { root, olderThanDays, dryRun, keep }),
+  /** Deletes versions of a song (short ids) under any of its names, freeing what they take. */
+  dropVersions: (root: string, versions: string[], paths: string[], dryRun: boolean) =>
+    invoke<Cleanup>("drop_versions", { root, versions, paths, dryRun }),
   exportZip: (root: string, rev: string, dest: string) => invoke<number>("export_zip", { root, rev, dest }),
   setAuthor: (root: string, name: string) => invoke<void>("set_author", { root, name }),
 

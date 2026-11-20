@@ -4,7 +4,7 @@
  * lanes (see `buildLanes`), plus what people keep about them in the project
  * (the song order, how each song's versions are wired into its branches).
  */
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText, type GraphVersion, type Overview, type RemovedFile, type TakeSource } from "./api";
 import {
@@ -19,8 +19,8 @@ import {
 } from "./blueprint";
 import type { ProjectFile } from "./components/FilesTab";
 import { useToast } from "./ui";
-import { splitPath } from "./util";
-import { follow, joinBranch, renameBranch, type Anchor } from "./wiring";
+import { formatSize, plural, splitPath } from "./util";
+import { dropBranch, follow, joinBranch, renameBranch, type Anchor } from "./wiring";
 
 /** The order songs are laid out in, shared by every device of the project. */
 export const ORDER_KEY = "songs.order";
@@ -57,6 +57,11 @@ export interface Songs {
   renameBranch: (lane: Lane, from: string, to: string) => void;
   /** All versions of branch `from` go to `into`. */
   joinBranch: (lane: Lane, from: string, into: string) => void;
+  /**
+   * Deletes a branch (not the one in the folder) with its versions, freeing
+   * the space they take, once people agree. Cannot be taken back.
+   */
+  deleteBranch: (lane: Lane, branch: string) => Promise<void>;
 }
 
 function parseWiring(values: Record<string, string>): Map<string, SongWiring> {
@@ -251,6 +256,41 @@ export function useSongs(
     joinBranch: (lane, from, into) => {
       relink(lane, joinBranch(lane, from, into));
       toast(`Версии ветки «${from}» перенесены в «${into}»`, "ok");
+    },
+    deleteBranch: async (lane, branch) => {
+      const b = lane.branches.find((x) => x.name === branch);
+      if (!b) return;
+      if (b.active) {
+        toast(`Ветка «${branch}» сейчас в папке: сначала положите в папку другую ветку`, "error");
+        return;
+      }
+      const versions = Object.entries(lane.branchOf)
+        .filter(([, name]) => name === branch)
+        .map(([sid]) => sid);
+      const inHistory = lane.nodes.some((n) => n.kind === "version" && n.branch === branch && n.onCurrent);
+      try {
+        const plan = await api.dropVersions(root, versions, lane.names, true);
+        const ok = await ask(
+          [
+            `Ветка «${branch}» трека «${name(lane)}» и ${b.versions} ${plural(b.versions, "версия", "версии", "версий")} в ней исчезнут${plan.bytes > 0 ? `, освободится ${formatSize(plan.bytes)}` : ""}.`,
+            inHistory ? "Версии из истории папки останутся в ней, но без файла." : "",
+            "Отменить это нельзя.",
+          ]
+            .filter(Boolean)
+            .join(" "),
+          { title: "Удалить ветку", kind: "warning", okLabel: "Удалить", cancelLabel: "Отмена" },
+        );
+        if (!ok) return;
+        relink(lane, dropBranch(lane, branch));
+        const done = await api.dropVersions(root, versions, lane.names, false);
+        toast(
+          `Ветка «${branch}» удалена${done.bytes > 0 ? `, освобождено ${formatSize(done.bytes)}` : ""}`,
+          "ok",
+        );
+        onChanged();
+      } catch (e) {
+        toast(errorText(e), "error");
+      }
     },
   };
 }

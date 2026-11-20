@@ -921,6 +921,17 @@ function SongVersions({
                             <Icon name="merge" size={14} /> Перенести все версии в «{o.name}»
                           </button>
                         ))}
+                        {!b.active && (
+                          <button
+                            className="popover-main danger-text"
+                            onClick={() => {
+                              setMenu(null);
+                              songs.deleteBranch(lane, b.name);
+                            }}
+                          >
+                            <Icon name="trash" size={14} /> Удалить ветку…
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

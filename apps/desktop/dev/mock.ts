@@ -274,6 +274,12 @@ mockIPC(
           : ["/home/me/Downloads/Ночь_final_v7.wav", "/home/me/Downloads/Stems"];
       case "plugin:dialog|ask":
         return true;
+      case "plugin:dialog|message": {
+        // Asking: the answer is always the first button ("ok").
+        const buttons = a.buttons as { OkCancelCustom?: [string, string]; OkCustom?: string } | string | undefined;
+        if (typeof buttons === "object") return buttons.OkCancelCustom?.[0] ?? buttons.OkCustom ?? "Ok";
+        return buttons === "YesNo" ? "Yes" : "Ok";
+      }
       case "save_take": {
         // A take beside the folder: a version of its own, kept by a take ref.
         const n = 40 + made++;
@@ -309,6 +315,8 @@ mockIPC(
         ];
       case "import_files":
         return { paths: ["Stems/bass.wav", "Ночь.wav"], replaced: 1, saved: 2 };
+      case "drop_versions":
+        return { versions: 2, contents: 1, bytes: 84_000_000 };
       case "cleanup":
         return a.olderThanDays === null
           ? { versions: 3, contents: 0, bytes: 96_000_000 }

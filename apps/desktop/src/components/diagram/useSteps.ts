@@ -72,19 +72,6 @@ export function useSteps({
     setSteps({ back: h.back.length, forth: 0 });
   }
 
-  /**
-   * Forgets every step that rewires `lane`: changed in a way that cannot be
-   * taken back (a branch deleted), its old wires must not come back over it.
-   */
-  function forget(lane: Lane) {
-    const h = stack.current;
-    const other = (s: Snapshot) => s.wired?.lane.id !== lane.id;
-    h.back = h.back.filter(other);
-    h.forth = h.forth.filter(other);
-    relinking.current.add(lane.id);
-    setSteps({ back: h.back.length, forth: h.forth.length });
-  }
-
   /** One step back (Ctrl+Z), or forth again after one (Ctrl+Shift+Z). */
   function step(way: "back" | "forth") {
     const h = stack.current;
@@ -146,5 +133,5 @@ export function useSteps({
     if (h.back.length + h.forth.length !== count) setSteps({ back: h.back.length, forth: h.forth.length });
   }, [lanes]);
 
-  return { steps, remember, forget, step };
+  return { steps, remember, step };
 }
