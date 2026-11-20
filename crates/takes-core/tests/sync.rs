@@ -754,3 +754,38 @@ fn webdav_push_and_clone() {
         assert!(matches!(wrong.list(""), Err(Error::RemoteAuth)));
     }
 }
+
+#[test]
+fn replaced_settings_files_leave_the_remote() {
+    let world = World::new();
+    let mut laptop = world.device("laptop");
+    write(&laptop, "a.wav", "a");
+    laptop.commit("a", &[]).unwrap();
+    let files = |world: &World| world.remote.list("settings").unwrap().len();
+    for n in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        laptop
+            .set_shared_setting("canvas.layout", &format!("{{\"n\":{n}}}"))
+            .unwrap();
+        world.sync(&mut laptop);
+        // Each sync sends the change, then removes the one it replaced.
+        assert_eq!(files(&world), 1, "after change {n}");
+    }
+
+    // Another device's later change replaces this one's file too, and a
+    // device that comes later still finds the latest value.
+    let mut studio = world.clone("studio");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    studio
+        .set_shared_setting("canvas.layout", r#"{"n":9}"#)
+        .unwrap();
+    world.sync(&mut studio);
+    assert_eq!(files(&world), 2);
+    world.sync(&mut laptop);
+    assert_eq!(files(&world), 1);
+    let stage = world.clone("stage");
+    assert_eq!(
+        stage.shared_setting("canvas.layout").unwrap().as_deref(),
+        Some(r#"{"n":9}"#)
+    );
+}

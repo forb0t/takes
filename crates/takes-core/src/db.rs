@@ -164,6 +164,17 @@ CREATE TABLE setting_events (
 CREATE INDEX setting_events_key ON setting_events (key, at);
 ";
 
+/// Settings files this device wrote to the remote, so it can remove each
+/// once a later change of that setting is there. Not a new schema version:
+/// builds that know version 5 simply leave it alone.
+const SENT_SETTINGS: &str = "
+CREATE TABLE IF NOT EXISTS sent_settings (
+    path TEXT PRIMARY KEY,
+    key  TEXT NOT NULL,
+    at   INTEGER NOT NULL
+);
+";
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -179,21 +190,21 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version > SCHEMA_VERSION {
         return Err(Error::TooNew("this project"));
     }
-    if version < 1 {
-        conn.execute_batch(SCHEMA)?;
+    // Each step and its version number in one transaction: a step cut short
+    // is taken back whole and runs again next time.
+    let steps = [
+        (1, SCHEMA),
+        (2, MIGRATION_2),
+        (3, MIGRATION_3),
+        (4, MIGRATION_4),
+        (5, MIGRATION_5),
+    ];
+    for (to, sql) in steps {
+        if version < to {
+            conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {to}; COMMIT;"))?;
+        }
     }
-    if version < 2 {
-        conn.execute_batch(&format!("BEGIN; {MIGRATION_2} COMMIT;"))?;
-    }
-    if version < 3 {
-        conn.execute_batch(&format!("BEGIN; {MIGRATION_3} COMMIT;"))?;
-    }
-    if version < 4 {
-        conn.execute_batch(&format!("BEGIN; {MIGRATION_4} COMMIT;"))?;
-    }
-    if version < 5 {
-        conn.execute_batch(&format!("BEGIN; {MIGRATION_5} COMMIT;"))?;
-    }
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    debug_assert_eq!(steps.last().map(|s| s.0), Some(SCHEMA_VERSION));
+    conn.execute_batch(SENT_SETTINGS)?;
     Ok(())
 }

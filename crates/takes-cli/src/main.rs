@@ -347,9 +347,14 @@ fn run(command: Command) -> Result<ExitCode> {
         } => {
             let mut repo = open()?;
             let imported = repo.import(&sources, &to)?;
+            // No paths would mean every change in the project.
+            if imported.is_empty() {
+                println!("Nothing to add: no files there.");
+                return Ok(ExitCode::SUCCESS);
+            }
             let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
             let mut saved = Vec::new();
-            match repo.commit_each(&paths, |change| {
+            match repo.commit_copies(&paths, |change| {
                 saved.push(format_change(change));
                 message.clone().unwrap_or_else(|| match change.kind {
                     ChangeKind::Added => format!("Add {}", change.path),

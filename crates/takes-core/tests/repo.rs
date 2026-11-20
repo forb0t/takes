@@ -1179,3 +1179,103 @@ fn shared_settings_are_read_by_prefix() {
     assert_eq!(all["track.a"], "3");
     assert_eq!(all["track.b"], "2");
 }
+
+#[test]
+fn renaming_by_letter_case_never_replaces_another_file() {
+    let (_dir, repo) = setup();
+    write(&repo, "Song.wav", "upper");
+    write(&repo, "song.wav", "lower");
+    // On a disk that ignores letter case, both names are one file.
+    let two_files = read(&repo, "Song.wav") != read(&repo, "song.wav");
+    let renamed = repo.rename_file("Song.wav", "song.wav");
+    if two_files {
+        assert!(matches!(renamed, Err(Error::WouldOverwrite(_))));
+        assert_eq!(read(&repo, "song.wav"), b"lower");
+        assert_eq!(read(&repo, "Song.wav"), b"upper");
+    }
+}
+
+#[test]
+fn a_new_file_where_a_folder_goes_stops_a_switch_before_anything_changes() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "a.wav", "a");
+    repo.commit("a", &[]).unwrap();
+    repo.create_branch("idea", None).unwrap();
+    repo.switch("idea").unwrap();
+    write(&repo, "Stems/kick.wav", "kick");
+    fs::remove_file(repo.root().join("a.wav")).unwrap();
+    repo.commit("stems", &[]).unwrap();
+    repo.switch("main").unwrap();
+    // Unsaved, and in the way: a file named like the folder "idea" needs.
+    write(&repo, "Stems", "notes");
+    assert!(matches!(repo.switch("idea"), Err(Error::DirtyWorktree(_))));
+    assert_eq!(repo.current_branch().unwrap(), "main");
+    assert_eq!(read(&repo, "a.wav"), b"a");
+    assert_eq!(read(&repo, "Stems"), b"notes");
+    // A new file elsewhere does not stop it.
+    fs::remove_file(repo.root().join("Stems")).unwrap();
+    write(&repo, "notes.txt", "x");
+    repo.switch("idea").unwrap();
+    assert_eq!(read(&repo, "Stems/kick.wav"), b"kick");
+}
+
+#[test]
+fn import_never_puts_a_file_where_a_folder_goes() {
+    let (dir, repo) = setup();
+    let outside = TempDir::new().unwrap();
+    let file = outside.path().join("x/mix");
+    let folder = outside.path().join("y/mix");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(&file, "file").unwrap();
+    fs::write(folder.join("a.wav"), "a").unwrap();
+    assert!(matches!(
+        repo.import(&[file, folder.clone()], ""),
+        Err(Error::WouldOverwrite(_))
+    ));
+    assert!(!exists(&repo, "mix"));
+    // Nor into a folder that is a file in the project.
+    write(&repo, "Stems", "notes");
+    assert!(matches!(
+        repo.import(&[folder], "Stems"),
+        Err(Error::WouldOverwrite(_))
+    ));
+    assert_eq!(read(&repo, "Stems"), b"notes");
+    drop(dir);
+}
+
+#[test]
+fn saving_a_copied_file_leaves_an_unrelated_deletion_unsaved() {
+    let (_dir, mut repo) = setup();
+    let take = noise(4096, 7);
+    write(&repo, "old/take.wav", &take);
+    repo.commit("take", &[]).unwrap();
+    fs::remove_file(repo.root().join("old/take.wav")).unwrap();
+    let outside = TempDir::new().unwrap();
+    let bounce = outside.path().join("take.wav");
+    fs::write(&bounce, &take).unwrap();
+    let imported = repo.import(&[bounce], "new").unwrap();
+    let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
+    let mut kinds = Vec::new();
+    repo.commit_copies(&paths, |c| {
+        kinds.push((c.path.clone(), c.kind));
+        "import".into()
+    })
+    .unwrap();
+    assert_eq!(kinds, vec![ch("new/take.wav", ChangeKind::Added)]);
+    assert_eq!(
+        changes(&repo),
+        vec![ch("old/take.wav", ChangeKind::Deleted)]
+    );
+}
+
+#[test]
+fn branches_cannot_take_the_names_of_takes() {
+    let (_dir, mut repo) = setup();
+    write(&repo, "a.wav", "a");
+    repo.commit("a", &[]).unwrap();
+    assert!(matches!(
+        repo.create_branch(&format!("{TAKE_PREFIX}demo"), None),
+        Err(Error::InvalidName(_))
+    ));
+}

@@ -248,6 +248,10 @@ impl Repo {
 
     fn add_branch(&mut self, name: &str, from: Option<&str>) -> Result<Hash> {
         validate_name(name)?;
+        // Those refs keep songs' takes beside the folder (see `save_take`).
+        if name.starts_with(TAKE_PREFIX) {
+            return Err(Error::InvalidName(name.into()));
+        }
         if self.ref_target(BRANCH, name)?.is_some() || name == self.current_branch()? {
             return Err(Error::BranchExists(name.into()));
         }
@@ -613,14 +617,18 @@ impl Repo {
                 }
             }
         }
-        // A file renamed away lives on under its new name.
+        // A file renamed away lives on under its new name: look at the
+        // versions that follow the last one with it.
+        let mut next: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        for id in order.keys() {
+            if let Some(parent) = graph.parents_of(id).first() {
+                next.entry(*parent).or_default().push(*id);
+            }
+        }
         let mut removed = Vec::new();
         for (path, last) in latest {
             let mut renamed = false;
-            for id in order
-                .keys()
-                .filter(|id| graph.parents_of(id).first() == Some(&last))
-            {
+            for id in next.get(&last).map_or(&[][..], Vec::as_slice) {
                 if self.entry(*id, &path)?.is_none()
                     && self
                         .rename_in(&self.snapshot(*id)?, None, Some(&path))?
@@ -913,23 +921,30 @@ impl Repo {
     }
 
     /// Unsaved changes that stop the folder from going from `from` to `to`:
-    /// any change to a saved file, and new files where `to` puts one. Other
-    /// new files simply stay.
+    /// any change to a saved file, and new files where `to` puts a file, a
+    /// file where `to` needs a folder, or inside a folder where `to` puts a
+    /// file. Other new files simply stay.
     fn unsaved_in_the_way(&self, from: &Tree, to: &Tree) -> Result<Vec<Change>> {
-        let touched: HashSet<&str> = from
+        let writes: HashSet<&str> = to
             .iter()
-            .filter(|(p, e)| to.get(*p) != Some(*e))
+            .filter(|(p, e)| from.get(*p) != Some(*e))
             .map(|(p, _)| p.as_str())
-            .chain(
-                to.keys()
-                    .filter(|p| !from.contains_key(*p))
-                    .map(String::as_str),
-            )
             .collect();
+        let folders: HashSet<&str> = writes
+            .iter()
+            .flat_map(|p| p.match_indices('/').map(move |(i, _)| &p[..i]))
+            .collect();
+        let in_the_way = |path: &str| {
+            writes.contains(path)
+                || folders.contains(path)
+                || path
+                    .match_indices('/')
+                    .any(|(i, _)| writes.contains(&path[..i]))
+        };
         Ok(self
             .status()?
             .into_iter()
-            .filter(|c| c.kind != ChangeKind::Added || touched.contains(c.path.as_str()))
+            .filter(|c| c.kind != ChangeKind::Added || in_the_way(&c.path))
             .collect())
     }
 
@@ -951,7 +966,7 @@ impl Repo {
         let branch = self.current_branch()?;
         let head = self.head()?;
         let mut tree = self.head_tree()?;
-        let (changes, fresh) = self.store_changes(&tree, paths)?;
+        let (changes, fresh) = self.store_changes(&tree, paths, true)?;
         if changes.is_empty() {
             return Err(Error::NothingToCommit);
         }
@@ -972,13 +987,34 @@ impl Repo {
     pub fn commit_each(
         &mut self,
         paths: &[&str],
+        message: impl FnMut(&Change) -> String,
+    ) -> Result<Vec<Hash>> {
+        self.commit_each_with(paths, message, true)
+    }
+
+    /// Like [`Repo::commit_each`] for files just copied into the folder
+    /// (imported, or a version brought back): one of them is never taken
+    /// for a rename of a file deleted elsewhere in the folder that had the
+    /// same content, so that unsaved deletion stays unsaved.
+    pub fn commit_copies(
+        &mut self,
+        paths: &[&str],
+        message: impl FnMut(&Change) -> String,
+    ) -> Result<Vec<Hash>> {
+        self.commit_each_with(paths, message, false)
+    }
+
+    fn commit_each_with(
+        &mut self,
+        paths: &[&str],
         mut message: impl FnMut(&Change) -> String,
+        pair_outside: bool,
     ) -> Result<Vec<Hash>> {
         let _lock = self.lock_shared()?;
         let branch = self.current_branch()?;
         let mut parent = self.head()?;
         let mut tree = self.head_tree()?;
-        let (changes, fresh) = self.store_changes(&tree, paths)?;
+        let (changes, fresh) = self.store_changes(&tree, paths, pair_outside)?;
         if changes.is_empty() {
             return Err(Error::NothingToCommit);
         }
@@ -998,12 +1034,14 @@ impl Repo {
 
     /// The changes under `paths` compared with `base`, with the contents of
     /// added and modified files stored (`None` for deletions), plus stat
-    /// cache rows for the files read.
+    /// cache rows for the files read. Without `pair_outside`, a rename with
+    /// one of its paths not under `paths` is only the change on the other.
     #[allow(clippy::type_complexity)]
     fn store_changes(
         &self,
         base: &Tree,
         paths: &[&str],
+        pair_outside: bool,
     ) -> Result<(Vec<(Change, Option<Blob>)>, Vec<(String, u64, i64, Hash)>)> {
         let selected = |path: &str| paths.is_empty() || paths.iter().any(|p| path_matches(p, path));
         // A rename belongs to both its paths.
@@ -1023,6 +1061,16 @@ impl Repo {
             })?
             .into_iter()
             .filter(|(c, _)| picked(c))
+            .map(|(c, file)| match c.from.clone() {
+                Some(from) if !pair_outside && !(selected(&c.path) && selected(&from)) => {
+                    if selected(&c.path) {
+                        (Change::new(c.path, ChangeKind::Added), file)
+                    } else {
+                        (Change::new(from, ChangeKind::Deleted), None)
+                    }
+                }
+                _ => (c, file),
+            })
             .collect();
         let mut out = Vec::new();
         let mut fresh = Vec::new();
@@ -1164,9 +1212,10 @@ impl Repo {
                 rev: "the folder".into(),
             });
         }
-        // On Windows and macOS "Song.wav" and "song.wav" are one file.
+        // On Windows and macOS "Song.wav" and "song.wav" are one file; on
+        // Linux they can be two, and the other one must not be replaced.
         let case_only = from.to_lowercase() == to.to_lowercase();
-        if dest.exists() && !case_only {
+        if dest.exists() && (!case_only || listed(&dest)) {
             return Err(Error::WouldOverwrite(vec![to.to_owned()]));
         }
         let busy = self.busy_files([from])?;
@@ -1705,6 +1754,17 @@ fn now_ns() -> i64 {
 
 fn now_secs() -> i64 {
     now_ns() / 1_000_000_000
+}
+
+/// Whether the folder of `path` has an entry of exactly that name, letter
+/// case included (on a case-insensitive disk, another case finds the file
+/// under its own name).
+fn listed(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    fs::read_dir(dir)
+        .is_ok_and(|mut entries| entries.any(|e| e.is_ok_and(|e| e.file_name() == name)))
 }
 
 #[cfg(test)]

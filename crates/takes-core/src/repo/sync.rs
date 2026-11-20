@@ -1492,6 +1492,40 @@ impl Repo {
                     "INSERT OR IGNORE INTO remote_seen (path) VALUES (?1)",
                     [path],
                 )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO sent_settings (path, key, at)
+                     SELECT ?2, key, at FROM setting_events WHERE uid = ?1",
+                    [uid, path],
+                )?;
+                Ok(())
+            },
+        )?;
+        self.forget_sent_settings(storage)
+    }
+
+    /// Removes this device's settings files that a later change of the same
+    /// setting, on the remote already, replaced: every device that reads
+    /// the remote takes the later one anyway, and settings changed often
+    /// (where things lie on the diagram) would pile up there otherwise.
+    fn forget_sent_settings(&mut self, storage: &dyn Storage) -> Result<()> {
+        let replaced: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT path FROM sent_settings s WHERE at <
+                 (SELECT MAX(at) FROM setting_events e WHERE e.key = s.key AND e.pushed = 1)",
+            )?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let conn = &self.conn;
+        parallel(
+            replaced,
+            |path| {
+                storage.delete(&path)?;
+                Ok(path)
+            },
+            |path| {
+                conn.execute("DELETE FROM sent_settings WHERE path = ?1", [path])?;
+                conn.execute("DELETE FROM remote_seen WHERE path = ?1", [path])?;
                 Ok(())
             },
         )?;

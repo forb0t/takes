@@ -92,7 +92,7 @@ impl Repo {
         message: &str,
     ) -> Result<Option<Hash>> {
         self.restore(from, rev, Some(path), false)?;
-        match self.commit_each(&[path], |_| message.to_owned()) {
+        match self.commit_copies(&[path], |_| message.to_owned()) {
             Ok(ids) => Ok(ids.last().copied()),
             Err(Error::NothingToCommit) => Ok(None),
             Err(e) => Err(e),

@@ -22,4 +22,3 @@ tauri-plugin-opener = "2.7.0"
 # A trackpad pinch is taken from GTK before WebKit zooms the whole window.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"
-webkit2gtk = "2.0.2"

@@ -152,35 +152,39 @@ pub async fn status(root: String) -> CmdResult<Vec<ChangeDto>> {
 
 /// What a version of one file is called when nobody described it.
 fn auto_message(change: &takes_core::Change) -> String {
-    let name = change.path.rsplit('/').next().unwrap_or(&change.path);
+    let name = name_of(&change.path);
     match change.kind {
         takes_core::ChangeKind::Added => format!("Новый файл «{name}»"),
         takes_core::ChangeKind::Modified => format!("Новая версия «{name}»"),
         takes_core::ChangeKind::Deleted => format!("Удалён «{name}»"),
         takes_core::ChangeKind::Renamed => {
             let old = change.from.as_deref().unwrap_or_default();
-            format!(
-                "Переименован «{}» → «{name}»",
-                old.rsplit('/').next().unwrap_or(old)
-            )
+            format!("Переименован «{}» → «{name}»", name_of(old))
         }
     }
 }
 
 /// Saves the changed files under `paths` (all if empty), each as a version
 /// of its own, described by `message` for its path; a version nobody
-/// described is named after its change.
+/// described is named after its change. `copies`: files just copied in,
+/// never taken for renames of files deleted elsewhere (see `commit_copies`).
 fn save_each(
     repo: &mut Repo,
     paths: &[&str],
+    copies: bool,
     message: impl Fn(&str) -> Option<String>,
 ) -> CmdResult<Vec<String>> {
-    let ids = repo.commit_each(paths, |change| {
+    let describe = |change: &takes_core::Change| {
         message(&change.path)
             .map(|m| m.trim().to_owned())
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| auto_message(change))
-    })?;
+    };
+    let ids = if copies {
+        repo.commit_copies(paths, describe)?
+    } else {
+        repo.commit_each(paths, describe)?
+    };
     Ok(ids.iter().map(|id| id.to_hex()).collect())
 }
 
@@ -194,7 +198,7 @@ pub async fn commit(
 ) -> CmdResult<Vec<String>> {
     blocking(move || {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-        save_each(&mut open(&root)?, &paths, |path| {
+        save_each(&mut open(&root)?, &paths, false, |path| {
             messages.get(path).cloned()
         })
     })
@@ -225,7 +229,7 @@ pub async fn import_files(
         };
         let paths: Vec<&str> = imported.iter().map(|i| i.path.as_str()).collect();
         let saved = if save && !paths.is_empty() {
-            match save_each(&mut repo, &paths, |_| message.clone()) {
+            match save_each(&mut repo, &paths, true, |_| message.clone()) {
                 Ok(ids) => ids.len(),
                 // The copies are identical to what is saved.
                 Err(e) if e.kind == "nothingToCommit" => 0,
@@ -451,7 +455,7 @@ pub async fn save_take(
     variant: String,
 ) -> CmdResult<String> {
     blocking(move || {
-        let song = path.rsplit('/').next().unwrap_or(&path);
+        let song = name_of(&path);
         let (from, what) = match &source {
             TakeSource::Outside(file) => (
                 TakeFrom::Outside(Path::new(file)),
@@ -488,7 +492,7 @@ pub async fn use_take(
     variant: String,
 ) -> CmdResult<Option<String>> {
     blocking(move || {
-        let song = path.rsplit('/').next().unwrap_or(&path);
+        let song = name_of(&path);
         let message = format!("«{song}»: в папке ветка «{variant}»");
         Ok(open(&root)?
             .use_take(&rev, &from, &path, &message)?

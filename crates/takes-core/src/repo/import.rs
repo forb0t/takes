@@ -94,11 +94,19 @@ impl Repo {
             Some(id) => self.tree(id)?,
             None => Default::default(),
         };
+        let targets: HashSet<&str> = plan.iter().map(|(_, t)| t.as_str()).collect();
         let mut blocked = Vec::new();
         for (_, target) in &plan {
             let abs = self.abs(target)?;
             let replaceable = saved.contains_key(target) && !unsaved.contains(target);
-            if abs.is_dir() || (abs.exists() && !replaceable) {
+            // A file (here or copied in) where the target needs a folder.
+            let mut under_file = false;
+            for (i, _) in target.match_indices('/') {
+                let folder = &target[..i];
+                let on_disk = self.abs(folder)?;
+                under_file |= targets.contains(folder) || (on_disk.exists() && !on_disk.is_dir());
+            }
+            if abs.is_dir() || (abs.exists() && !replaceable) || under_file {
                 blocked.push(target.clone());
             }
         }
