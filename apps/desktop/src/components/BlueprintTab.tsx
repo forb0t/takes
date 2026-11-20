@@ -39,7 +39,7 @@ import { FileMetaDialog } from "./FileMetaDialog";
 import { SongBranchDialog } from "./SongBranchDialog";
 import { SETTLE_MS, type Songs } from "../songs";
 import { useFileActions } from "./useFileActions";
-import { connect, follows, moveOne, unplug } from "../wiring";
+import { connect, follows, keepSaved, moveOne, unplug } from "../wiring";
 
 /** Shared by every device of the project: where things lie, the tiles. */
 const LAYOUT_KEY = "canvas.layout";
@@ -112,6 +112,23 @@ interface Pull {
   /** What letting go there does; nothing when not `ok`. */
   hint: string;
   ok: boolean;
+}
+
+/** How things lay at a moment, to go back or forth to; `wired`: how one song was wired then. */
+interface Snapshot {
+  /** When it was taken; 0 for one that never joins the next change into one step. */
+  at: number;
+  layout: Layout;
+  tiles: Tile[];
+  wired?: { lane: Lane; links: SongLinks };
+}
+
+/** Something the search found: a lane, a tile, or a version (`key`) in lane `lane`. */
+type Match = { key: string; rect: Rect; lane?: string };
+
+/** Where a menu opens: at the cursor, or up by about its height near the bottom of the window. */
+function menuTop(menu: Menu) {
+  return Math.max(8, Math.min(menu.y, window.innerHeight - menu.items.length * 36 - 20));
 }
 
 /** What plugging a wire in somewhere does. */
@@ -325,6 +342,8 @@ export function BlueprintTab({
   const [found, setFound] = useState(0);
   const search = useRef<HTMLInputElement>(null);
   const [showMap, setShowMap] = useState(() => loadFlag("takes.bpmap", true));
+  /** The sheet of what can be done on the diagram and how. */
+  const [help, setHelp] = useState(false);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [panning, setPanning] = useState(false);
   const [box, setBox] = useState<HTMLDivElement | null>(null);
@@ -398,24 +417,53 @@ export function BlueprintTab({
 
   const fileByPath = useMemo(() => new Map((files ?? []).map((f) => [f.path, f])), [files]);
 
-  // What the search finds: songs by any of their names or branches, tiles by their text.
-  const q = query.trim().toLowerCase();
-  const matches = useMemo(() => {
-    if (!q) return null;
-    const lanesFound = basePlaced
-      .filter((p) => [...p.lane.names, ...p.lane.branches.map((b) => b.name)].some((n) => n.toLowerCase().includes(q)))
-      .map((p) => ({ key: p.lane.path, rect: laneRect(p) }));
-    const tilesFound = tiles
-      .filter((t) => `${t.title} ${t.text}`.toLowerCase().includes(q))
-      .map((t) => ({ key: t.id, rect: t as Rect }));
-    return [...lanesFound, ...tilesFound].sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
-  }, [q, basePlaced, tiles]);
-  const matched = useMemo(() => (matches ? new Set(matches.map((m) => m.key)) : null), [matches]);
   const tagsOf = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const t of overview.tags) map.set(t.target, [...(map.get(t.target) ?? []), t.name]);
     return map;
   }, [overview.tags]);
+
+  // What the search finds: songs by any of their names or branches, versions by
+  // their description, labels and marks, tiles by their text.
+  const q = query.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (!q) return null;
+    const lanesFound: Match[] = basePlaced
+      .filter((p) => [...p.lane.names, ...p.lane.branches.map((b) => b.name)].some((n) => n.toLowerCase().includes(q)))
+      .map((p) => ({ key: p.lane.path, rect: laneRect(p) }));
+    const versionsFound: Match[] = basePlaced.flatMap((p) =>
+      p.lane.nodes.flatMap((n) => {
+        const at = p.at.get(n.key);
+        if (n.kind !== "version" || !at) return [];
+        const text = [n.version.message, ...n.labels, ...(tagsOf.get(n.version.id) ?? [])].join(" ");
+        if (!text.toLowerCase().includes(q)) return [];
+        const rect = { x: p.origin.x + at.x, y: p.origin.y + at.y, ...nodeSize(n.key) };
+        return [{ key: n.key, lane: p.lane.path, rect }];
+      }),
+    );
+    const tilesFound: Match[] = tiles
+      .filter((t) => `${t.title} ${t.text}`.toLowerCase().includes(q))
+      .map((t) => ({ key: t.id, rect: t as Rect }));
+    return [...lanesFound, ...versionsFound, ...tilesFound].sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+  }, [q, basePlaced, tiles, tagsOf]);
+  /** Lanes and tiles the search keeps lit; a lane stays lit for a version found in it. */
+  const matched = useMemo(() => (matches ? new Set(matches.map((m) => m.lane ?? m.key)) : null), [matches]);
+  /** The versions found, by lane. */
+  const hits = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const m of matches ?? []) if (m.lane) map.set(m.lane, (map.get(m.lane) ?? new Set()).add(m.key));
+    return map;
+  }, [matches]);
+  /** The version Enter went to last, marked apart from the other ones found. */
+  const hitNow = found >= 0 && matches?.[found]?.lane ? matches[found] : null;
+
+  // The sheet closes on a press anywhere else.
+  useEffect(() => {
+    if (!help) return;
+    const close = (e: Event) => !(e.target as Element | null)?.closest?.(".bp-help, .bp-help-sheet") && setHelp(false);
+    window.addEventListener("pointerdown", close, true);
+    return () => window.removeEventListener("pointerdown", close, true);
+  }, [help]);
 
   useEffect(() => {
     if (!menu) return;
@@ -429,6 +477,19 @@ export function BlueprintTab({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("blur", close);
     };
+  }, [menu]);
+
+  const menuBox = useRef<HTMLDivElement>(null);
+  // Labels may wrap, so how tall a menu is shows only once drawn: one that runs
+  // past the bottom of the window goes up (and scrolls if still too tall).
+  useLayoutEffect(() => {
+    const el = menuBox.current;
+    if (!el || !menu) return;
+    el.style.top = `${menuTop(menu)}px`;
+    const { height } = el.getBoundingClientRect();
+    if (menuTop(menu) + height > window.innerHeight - 8) {
+      el.style.top = `${Math.max(8, window.innerHeight - 8 - height)}px`;
+    }
   }, [menu]);
 
   const select = useCallback((path: string, key: string | null, draft = false) => {
@@ -522,11 +583,77 @@ export function BlueprintTab({
     [box],
   );
 
+  /** The file panel beside the canvas, when open. */
+  const panelBox = useRef<HTMLElement>(null);
+
+  /**
+   * Brings one node into sight, big enough to read and clear of the file panel.
+   * Measured in the next frame, so a panel that has just opened counts: beside a
+   * wide canvas it takes its room, in a narrow window it covers the right.
+   */
+  function focusNode(rect: Rect) {
+    requestAnimationFrame(() => {
+      if (!box) return;
+      const { clientWidth: w, clientHeight: h } = box;
+      const panel = panelBox.current;
+      const covered = panel && getComputedStyle(panel).position === "absolute" ? panel.offsetWidth : 0;
+      setView((v) => {
+        const zoom = Math.max(v.zoom, 0.75);
+        return {
+          zoom,
+          x: Math.max(16, (w - covered - rect.w * zoom) / 2) - rect.x * zoom,
+          y: h / 2 - (rect.y + rect.h / 2) * zoom,
+        };
+      });
+    });
+  }
+
+  /** The file `nextUnsaved` showed last, and the order the unsaved files were in then. */
+  const unsavedSeen = useRef<{ path: string; order: string[] } | null>(null);
+
+  /**
+   * The next file not saved yet: in sight, with its panel open to describe and save it.
+   * "Next" is the one after the file shown last, also when that one has been saved since
+   * and so is no longer in the list.
+   */
+  function nextUnsaved() {
+    const all = basePlaced
+      .flatMap((p) =>
+        p.lane.nodes.flatMap((n) => {
+          const at = p.at.get(nodeKey(n));
+          if (n.kind !== "work" || !at) return [];
+          const rect = { x: p.origin.x + at.x, y: p.origin.y + at.y, ...nodeSize(nodeKey(n)) };
+          return [{ lane: p.lane, n, rect }];
+        }),
+      )
+      .sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+    if (!all.length) return;
+    const order = all.map((u) => u.lane.path);
+    const seen = unsavedSeen.current;
+    let at = 0;
+    if (seen && order.includes(seen.path)) {
+      at = (order.indexOf(seen.path) + 1) % order.length;
+    } else if (seen) {
+      const after = seen.order.slice(seen.order.indexOf(seen.path) + 1).find((p) => order.includes(p));
+      at = after ? order.indexOf(after) : 0;
+    }
+    unsavedSeen.current = { path: order[at], order };
+    const { lane, n, rect } = all[at];
+    select(lane.path, n.key, true);
+    focusNode(rect);
+  }
+
   function findNext(step: 1 | -1) {
     if (!matches?.length) return;
     const next = (found + step + matches.length) % matches.length;
     setFound(next);
-    focusRect(matches[next].rect);
+    const m = matches[next];
+    if (m.lane) {
+      focusNode(m.rect);
+      shine(m.key);
+    } else {
+      focusRect(m.rect);
+    }
   }
 
   /** A point on the screen, on the canvas. */
@@ -542,6 +669,8 @@ export function BlueprintTab({
   useEffect(() => {
     if (!box) return;
     const onWheel = (e: WheelEvent) => {
+      // The help sheet scrolls by itself.
+      if ((e.target as HTMLElement).closest(".bp-help-sheet")) return;
       const area = (e.target as HTMLElement).closest("textarea");
       if (area && area.scrollHeight > area.clientHeight && !e.ctrlKey) return;
       e.preventDefault();
@@ -650,29 +779,110 @@ export function BlueprintTab({
     saveSetting(TILES_KEY, next);
   }
 
-  /** What Ctrl+Z takes back, newest last. */
-  const undo = useRef<{ at: number; back: () => void }[]>([]);
+  /** The songs as last built, for a step back or forth made later. */
+  const lanesNow = useRef(lanes);
+  lanesNow.current = lanes;
+
+  /**
+   * What Ctrl+Z takes back (`back`) and Ctrl+Shift+Z brings again (`forth`), newest last;
+   * `landed`: how things were right after the last step (see `shape`), null until seen.
+   */
+  const stack = useRef<{ back: Snapshot[]; forth: Snapshot[]; landed: string | null }>({
+    back: [],
+    forth: [],
+    landed: null,
+  });
+  /** How many steps there are each way, for the buttons. */
+  const [steps, setSteps] = useState({ back: 0, forth: 0 });
+  /** How each song was wired when last drawn, by id, to tell a rewiring made elsewhere. */
+  const wiredSeen = useRef(new Map<string, SongLinks>());
+  /** Songs a change or a step here rewires before the next drawing, by id. */
+  const relinking = useRef(new Set<string>());
+
+  /** How things lie now; with `lane`, also how that song is wired now. */
+  function snapshot(at: number, lane?: Lane): Snapshot {
+    const now = lane && (lanesNow.current?.find((l) => l.id === lane.id) ?? lane);
+    return { at, layout: layoutNow.current, tiles: tilesNow.current, wired: now && { lane: now, links: now.links } };
+  }
 
   /**
    * Remembers how things lie before a change, so Ctrl+Z can bring it back;
-   * `also` undoes what else the change does. Changes made together (within
-   * a moment) are one step.
+   * with `lane`, the change rewires that song too. Changes made together
+   * (within a moment) are one step. A new change forgets what was undone.
    */
-  function remember(also?: () => void) {
-    const last = undo.current[undo.current.length - 1];
-    if (!also && last && Date.now() - last.at < 300) return;
-    const layoutBefore = layoutNow.current;
-    const tilesBefore = tilesNow.current;
-    undo.current.push({
-      at: Date.now(),
-      back: () => {
-        also?.();
-        putLayout(layoutBefore);
-        putTiles(tilesBefore);
-      },
-    });
-    if (undo.current.length > 50) undo.current.shift();
+  function remember(lane?: Lane) {
+    const h = stack.current;
+    const last = h.back[h.back.length - 1];
+    if (!lane && last && Date.now() - last.at < 300) return;
+    if (lane) relinking.current.add(lane.id);
+    h.back.push(snapshot(Date.now(), lane));
+    if (h.back.length > 50) h.back.shift();
+    h.forth = [];
+    setSteps({ back: h.back.length, forth: 0 });
   }
+
+  /** One step back (Ctrl+Z), or forth again after one (Ctrl+Shift+Z). */
+  function step(way: "back" | "forth") {
+    const h = stack.current;
+    const to = h[way].pop();
+    if (!to) {
+      toast(way === "back" ? "Отменять нечего" : "Возвращать нечего", "info");
+      return;
+    }
+    // How things are now, to come back to; never one step with the next change.
+    const now = snapshot(0, to.wired?.lane);
+    (way === "back" ? h.forth : h.back).push(now);
+    if (now.wired && to.wired) {
+      // A branch made since stays; other versions saved since go after the one they were made from.
+      relinking.current.add(now.wired.lane.id);
+      songs.relink(now.wired.lane, keepSaved(now.wired.lane, to.wired.links));
+    }
+    putLayout(to.layout);
+    putTiles(to.tiles);
+    h.landed = null;
+    setSteps({ back: h.back.length, forth: h.forth.length });
+    toast(way === "back" ? "Отменено" : "Возвращено", "info");
+  }
+  const stepNow = useRef(step);
+  stepNow.current = step;
+
+  /** Everything a step puts back, as text, to tell whether anything changed since. */
+  const shape = useMemo(
+    () => JSON.stringify([layout, tiles, lanes?.map((l) => [l.id, l.links])]),
+    [layout, tiles, lanes],
+  );
+
+  // What was taken back comes back only onto what the step left. A change made
+  // since in any other way (a file copied in by a wire, a new branch, a version
+  // saved, a sync from another device) forgets it, as a change on the diagram does.
+  useEffect(() => {
+    const h = stack.current;
+    if (h.landed === null) h.landed = shape;
+    else if (h.forth.length && shape !== h.landed) {
+      h.forth = [];
+      setSteps({ back: h.back.length, forth: 0 });
+    }
+  });
+
+  // A song rewired some other way (a file copied in by a wire, a version put into
+  // the folder, a sync from another device): a step would put its old wires back
+  // over the new ones, so the steps that rewire it are forgotten. New versions
+  // alone (a save, a new branch) keep them: see `keepSaved` for where those go.
+  useEffect(() => {
+    const h = stack.current;
+    const count = h.back.length + h.forth.length;
+    for (const l of lanes ?? []) {
+      const before = wiredSeen.current.get(l.id);
+      wiredSeen.current.set(l.id, l.links);
+      if (!before || before === l.links || relinking.current.has(l.id)) continue;
+      if (Object.keys(before).every((v) => l.links[v] === before[v])) continue;
+      const other = (s: Snapshot) => s.wired?.lane.id !== l.id;
+      h.back = h.back.filter(other);
+      h.forth = h.forth.filter(other);
+    }
+    relinking.current.clear();
+    if (h.back.length + h.forth.length !== count) setSteps({ back: h.back.length, forth: h.forth.length });
+  }, [lanes]);
 
   function saveLayout(next: Layout) {
     remember();
@@ -934,13 +1144,15 @@ export function BlueprintTab({
 
   /** The song wired anew; Ctrl+Z brings back how it was, and `moved` shines for a moment. */
   function rewire(lane: Lane, links: SongLinks, moved?: string) {
-    const before = lane.links;
-    remember(() => songs.relink(lane, before));
+    remember(lane);
     songs.relink(lane, links);
-    if (moved) {
-      setFlash(moved);
-      setTimeout(() => setFlash((f) => (f === moved ? null : f)), 1600);
-    }
+    if (moved) shine(moved);
+  }
+
+  /** A version shines for a moment, to be seen. */
+  function shine(key: string) {
+    setFlash(key);
+    setTimeout(() => setFlash((f) => (f === key ? null : f)), 1600);
   }
 
   /** Unplugs version `key`: it and what follows it are wired into no branch. */
@@ -1128,20 +1340,38 @@ export function BlueprintTab({
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // F shows everything, + and − zoom, 0 returns to 100%, Ctrl+F finds, Ctrl+Z takes back.
+  // Esc closes the help sheet, then the file panel with the selection; an open menu and a pulled wire take it first.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ" && !e.shiftKey) {
+      if (e.key !== "Escape" || menu || editing || (!help && !selected && !selectedTile)) return;
+      // A field in the file panel (the description) gives Esc to the panel: what was typed stays as the draft.
+      const field = (e.target as HTMLElement).closest("input, textarea, select, [contenteditable]");
+      if (e.isComposing || (field && !field.closest(".bp-panel"))) return;
+      // A dialog takes Esc, also one it has closed already (its listener may come first): the target is gone then.
+      const target = e.target as HTMLElement;
+      if (target.closest(".modal-backdrop") || !document.contains(target)) return;
+      if (document.querySelector(".modal-backdrop")) return;
+      if (help) {
+        setHelp(false);
+        return;
+      }
+      setSelected(null);
+      setSelectedTile(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  // F shows everything, + and − zoom, 0 returns to 100%, Ctrl+F finds,
+  // Ctrl+Z takes back, Ctrl+Shift+Z (or Ctrl+Y) brings back what was taken back.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const forth = (e.code === "KeyZ" && e.shiftKey) || (e.code === "KeyY" && !e.shiftKey);
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && ((e.code === "KeyZ" && !e.shiftKey) || forth)) {
         if ((e.target as HTMLElement).closest("input, textarea, [contenteditable]")) return;
         if (document.querySelector(".modal-backdrop")) return;
-        const step = undo.current.pop();
         e.preventDefault();
-        if (step) {
-          step.back();
-          toast("Отменено", "info");
-        } else {
-          toast("Отменять нечего", "info");
-        }
+        stepNow.current(forth ? "forth" : "back");
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyF" && !document.querySelector(".modal-backdrop")) {
@@ -1153,7 +1383,8 @@ export function BlueprintTab({
       if (e.ctrlKey || e.metaKey || e.altKey || !box) return;
       if ((e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
       if (document.querySelector(".modal-backdrop")) return;
-      if (e.code === "KeyF" || e.code === "Home") fit();
+      if (e.key === "?") setHelp((h) => !h);
+      else if (e.code === "KeyF" || e.code === "Home") fit();
       else if (e.key === "+" || e.key === "=") zoomBy(1.2);
       else if (e.key === "-") zoomBy(1 / 1.2);
       else if (e.key === "0") zoomBy(1 / view.zoom);
@@ -1352,8 +1583,7 @@ export function BlueprintTab({
         label: `Перенести все версии в «${o.name}»`,
         icon: "merge",
         run: () => {
-          const before = lane.links;
-          remember(() => songs.relink(lane, before));
+          remember(lane);
           songs.joinBranch(lane, b.name, o.name);
         },
       });
@@ -1479,8 +1709,16 @@ export function BlueprintTab({
         <div className="bp-toolbar">
           <span className="muted">
             {songCount} {plural(songCount, "песня", "песни", "песен")}
-            {unsaved > 0 && ` · не сохранено: ${unsaved}`}
           </span>
+          {unsaved > 0 && (
+            <button
+              className="chip bp-unsaved"
+              onClick={nextUnsaved}
+              title="Показать следующий несохранённый файл и открыть его сохранение"
+            >
+              <Icon name="edit" size={12} /> не сохранено · {unsaved}
+            </button>
+          )}
           {removedCount > 0 && (
             <button
               className={`chip ${showRemoved ? "chip-on" : ""}`}
@@ -1494,7 +1732,7 @@ export function BlueprintTab({
             <input
               ref={search}
               value={query}
-              placeholder="Найти песню, ветку, заметку"
+              placeholder="Найти песню, ветку, версию, заметку"
               title="Ctrl+F · Enter — следующая, Shift+Enter — предыдущая, Esc — сбросить"
               onChange={(e) => {
                 setQuery(e.target.value);
@@ -1515,6 +1753,26 @@ export function BlueprintTab({
             )}
           </div>
           <span className="grow" />
+          <span className="bp-steps">
+            <button
+              className="icon-btn"
+              disabled={!steps.back}
+              onClick={() => step("back")}
+              title="Отменить (Ctrl+Z)"
+              aria-label="Отменить"
+            >
+              <Icon name="undo" size={14} />
+            </button>
+            <button
+              className="icon-btn bp-redo"
+              disabled={!steps.forth}
+              onClick={() => step("forth")}
+              title="Вернуть отменённое (Ctrl+Shift+Z)"
+              aria-label="Вернуть отменённое"
+            >
+              <Icon name="undo" size={14} />
+            </button>
+          </span>
           <span className="bp-legend muted">
             <i className="bp-sw sw-song" /> песня
             <i className="bp-sw sw-version" /> версия
@@ -1554,24 +1812,14 @@ export function BlueprintTab({
           >
             карта
           </button>
-          <span
-            className="bp-help"
-            title={
-              "Красный заголовок — песня, синий — версия, серый — версия не из папки, оранжевый — файл не сохранён\n" +
-              "Тащите полотно мышью (или средней кнопкой)\n" +
-              "Колесо — прокрутка, Shift + колесо — вбок\n" +
-              "Ctrl + колесо — масштаб, 0 — 100%, F — показать всё, Ctrl+F — найти, Ctrl+Z — отменить\n" +
-              "Узел ставится куда угодно — ветки от этого не меняются; «Вернуть в дорожку» в его меню\n" +
-              "Провода решают, что в какой ветке: тащите провод за конец к другому узлу, двойной щелчок — оборвать\n" +
-              "От пина ▷ можно провести новый провод; Alt + щелчок по пину — оборвать. Esc — бросить провод\n" +
-              "Версия идёт со всем, что за ней на проводе; оборванные — в ряду «Без ветки»\n" +
-              "Провод к версии или файлу другой песни — их копия станет версией этой песни\n" +
-              "Песню целиком двигает заголовок её рамки, вместе с заметками на ней\n" +
-              "Правая кнопка — действия, на пустом месте — новые тайлы"
-            }
+          <button
+            className={`bp-help ${help ? "on" : ""}`}
+            onClick={() => setHelp((h) => !h)}
+            title="Как работать со схемой (?)"
+            aria-expanded={help}
           >
             ?
-          </span>
+          </button>
           <div className="bp-zoom" title="Масштаб: Ctrl + колесо мыши">
             <button className="icon-btn" onClick={() => zoomBy(1 / 1.2)} aria-label="Мельче">
               <Icon name="minus" size={14} />
@@ -1634,6 +1882,8 @@ export function BlueprintTab({
                 tagsOf={tagsOf}
                 selectedKey={selected?.path === p.lane.path ? (selected.key ?? "") : null}
                 dim={!!matched && !matched.has(p.lane.path)}
+                hits={hits.get(p.lane.path) ?? null}
+                hitNow={hitNow?.lane === p.lane.path ? hitNow.key : null}
                 pullAt={pull?.target?.lane === p.lane.path ? `${pull.ok ? "ok" : "bad"}:${pull.target.key}` : null}
                 pullWire={
                   pull?.moving && pull.fixed.lane === p.lane.path ? `${pull.moving.from}>${pull.moving.to}` : null
@@ -1698,15 +1948,17 @@ export function BlueprintTab({
               onCenter={(x, y) => setView((v) => ({ ...v, x: size.w / 2 - x * v.zoom, y: size.h / 2 - y * v.zoom }))}
             />
           )}
+          {help && <HelpSheet />}
         </div>
       </div>
 
       {menu && (
         <div
+          ref={menuBox}
           className="popover bp-menu"
           style={{
             left: Math.min(menu.x, window.innerWidth - 276),
-            top: Math.max(8, Math.min(menu.y, window.innerHeight - menu.items.length * 36 - 20)),
+            top: menuTop(menu),
           }}
           onContextMenu={(e) => e.preventDefault()}
         >
@@ -1726,7 +1978,7 @@ export function BlueprintTab({
       )}
 
       {panelLane && (
-        <aside className="bp-panel scroll">
+        <aside ref={panelBox} className="bp-panel scroll">
           <button className="icon-btn bp-panel-close" onClick={() => setSelected(null)} aria-label="Закрыть">
             <Icon name="close" size={14} />
           </button>
@@ -1794,8 +2046,7 @@ export function BlueprintTab({
             if (to !== name && lane.branches.some((b) => b.name.toLowerCase() === to.toLowerCase())) {
               throw new Error(`У трека уже есть ветка «${to}»`);
             }
-            const before = lane.links;
-            remember(() => songs.relink(lane, before));
+            remember(lane);
             songs.renameBranch(lane, name, to);
           }}
           onClose={() => setRenamingBranch(null)}
@@ -1870,6 +2121,93 @@ function wiresOf(lane: Lane): Wire[] {
   return wires;
 }
 
+/** What the help sheet says: groups of "do this" — "and this happens". */
+const HELP: [string, [string, string][]][] = [
+  [
+    "Полотно",
+    [
+      ["Тащите пустое место", "двигать полотно (можно средней кнопкой)"],
+      ["Колесо, Shift + колесо", "прокрутка вниз и вбок"],
+      ["Ctrl + колесо, щипок, + и −", "масштаб; 0 — 100%, F — показать всё"],
+      ["Ctrl+F", "найти песню, ветку, версию по описанию, заметку; Enter — к следующей"],
+    ],
+  ],
+  [
+    "Провода: что в какой ветке",
+    [
+      ["Тащите от пина ▷", "новый провод; подсказка у курсора скажет, что будет"],
+      ["Зажмите провод", "ближний конец пойдёт за курсором; отпустите на другом узле"],
+      ["Версия на проводе", "идёт со всем, что за ней; одну её переносит меню «Перенести в ветку»"],
+      ["Двойной щелчок по проводу", "оборвать: версия и те, что за ней, уйдут в ряд «Без ветки»"],
+      ["Alt + щелчок по пину", "оборвать его провод"],
+      ["Esc", "бросить тянущийся провод"],
+      ["Провод от другой песни", "копия её файла станет версией этой песни"],
+    ],
+  ],
+  [
+    "Узлы и тайлы",
+    [
+      ["Тащите узел", "поставить куда угодно, вне дорожки; ветки от этого не меняются"],
+      ["«Вернуть в дорожку»", "в меню такого узла: он встанет на своё место"],
+      ["«Собрать узлы в дорожку»", "в меню песни: все её узлы вернутся на места"],
+      ["Тащите заголовок рамки песни", "двигать песню целиком, с заметками на ней"],
+      ["Правая кнопка", "все действия; по пустому месту — заметка, заготовка, рамка"],
+      ["Двойной щелчок по тайлу", "изменить; Delete — удалить выбранный"],
+    ],
+  ],
+  [
+    "Правка",
+    [
+      ["Ctrl+Z", "отменить"],
+      ["Ctrl+Shift+Z или Ctrl+Y", "вернуть отменённое"],
+      ["«не сохранено · N»", "к следующему несохранённому файлу"],
+      ["Esc", "закрыть панель файла"],
+    ],
+  ],
+];
+
+/** What the colours of node titles mean. */
+const HELP_COLORS: [string, string][] = [
+  ["sw-song", "песня"],
+  ["sw-branch", "ветка"],
+  ["sw-version", "версия"],
+  ["sw-other", "другая ветка (не та, что в папке)"],
+  ["sw-merge", "слияние двух веток"],
+  ["sw-deleted", "файл в этой версии удалён"],
+  ["sw-loose", "без ветки: провод оборван"],
+  ["sw-work", "не сохранено"],
+];
+
+/** Everything the diagram can do and how, with what its colours mean. */
+function HelpSheet() {
+  return (
+    <div
+      className="bp-help-sheet"
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      <div className="bp-help-colors muted">
+        {HELP_COLORS.map(([cls, what]) => (
+          <span key={cls} className="nowrap">
+            <i className={`bp-sw ${cls}`} /> {what}
+          </span>
+        ))}
+      </div>
+      {HELP.map(([group, rows]) => (
+        <section key={group}>
+          <h4>{group}</h4>
+          {rows.map(([how, what]) => (
+            <div key={how} className="bp-help-row">
+              <span className="bp-help-how">{how}</span>
+              <span className="muted">{what}</span>
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
+  );
+}
+
 /** An execution pin, filled when a wire is attached; a wire can be pulled from it. */
 function ExecPin({ side, on, onPull }: { side: "in" | "out"; on: boolean; onPull?: (e: React.PointerEvent) => void }) {
   return (
@@ -1927,6 +2265,8 @@ const LaneView = memo(function LaneView({
   pullWire,
   flash,
   dim,
+  hits,
+  hitNow,
   act,
 }: {
   root: string;
@@ -1947,6 +2287,10 @@ const LaneView = memo(function LaneView({
   flash: string | null;
   /** Not what the search is looking for. */
   dim: boolean;
+  /** Versions the search found here. */
+  hits: Set<string> | null;
+  /** The one of them Enter went to last. */
+  hitNow: string | null;
   act: React.RefObject<Actions>;
 }) {
   const { lane, origin, at, frame } = placed;
@@ -2318,6 +2662,7 @@ const LaneView = memo(function LaneView({
               isSelected ? "selected" : "",
               dragging === key ? "dragging" : "",
               flash === n.key ? "flash" : "",
+              hits?.has(n.key) ? (hitNow === n.key ? "hit hit-now" : "hit") : "",
               pullCls(key),
             ].join(" ")}
             onClick={() => act.current.select(lane.path, n.key)}

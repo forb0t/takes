@@ -113,3 +113,24 @@ export function renameBranch(lane: Lane, from: string, to: string): SongLinks {
   for (const [sid, ref] of Object.entries(lane.links)) links[sid] = ref === branchKey(from) ? branchKey(to) : ref;
   return links;
 }
+
+/**
+ * Wiring `links` as it was before a step, with the versions it did not have
+ * (saved since): a branch made since keeps the ones it starts with, as they
+ * are; every other one is left out, so it goes after the version it was made
+ * from, as any version nobody wired does (see `buildLanes`).
+ */
+export function keepSaved(lane: Lane, links: SongLinks): SongLinks {
+  const next = { ...links };
+  const after = followers(lane.links);
+  for (const name of new Set(Object.values(lane.branchOf))) {
+    if (!name) continue;
+    const seen = new Set<string>();
+    for (let sid = after.get(branchKey(name)); sid !== undefined && !seen.has(sid); sid = after.get(sid)) {
+      if (sid in links) break;
+      seen.add(sid);
+      next[sid] = lane.links[sid];
+    }
+  }
+  return next;
+}

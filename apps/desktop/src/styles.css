@@ -2491,7 +2491,81 @@ input[type="checkbox"]:disabled {
   color: var(--muted);
   font-size: 11.5px;
   font-weight: 600;
-  cursor: help;
+}
+
+.bp-help:hover,
+.bp-help.on {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* The help sheet: in the canvas's top right corner, over the minimap and a panel covering the canvas. */
+.bp-help-sheet {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 20;
+  width: min(400px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 10px 14px 12px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  font-size: 12.5px;
+  user-select: text;
+}
+
+.bp-help-sheet h4 {
+  margin: 12px 0 4px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.bp-help-row {
+  display: grid;
+  grid-template-columns: 42% 1fr;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.bp-help-how {
+  color: var(--text);
+}
+
+.bp-help-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11.5px;
+}
+
+.bp-help-colors .bp-sw {
+  display: inline-block;
+  margin: 0 4px 0 0;
+  vertical-align: -1px;
+}
+
+/* Files not saved yet, in the orange of their "Сейчас в папке" nodes: a click shows the next one. */
+.bp-unsaved {
+  color: #f0a040;
+}
+
+.bp-steps {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.bp-steps .icon-btn:disabled {
+  opacity: 0.35;
+}
+
+/* "Bring back" is the "take back" arrow, turned the other way. */
+.bp-redo svg {
+  transform: scaleX(-1);
 }
 
 .bp-zoom {
@@ -2530,21 +2604,25 @@ input[type="checkbox"]:disabled {
   --head: #50505a;
 }
 
+.sw-merge,
 .bp-version.merge {
   --head: #6b3fa3;
 }
 
 /* Unplugged: wired into no branch. */
+.sw-loose,
 .bp-version.loose,
 .bp-loose-node {
   --head: #3c3c46;
 }
 
+.sw-loose,
 .bp-version.loose {
   outline: 1px dashed rgba(255, 255, 255, 0.28);
   outline-offset: 2px;
 }
 
+.sw-deleted,
 .bp-version.change-deleted {
   --head: #6e2a2a;
 }
@@ -2782,6 +2860,7 @@ input[type="checkbox"]:disabled {
   background: none;
 }
 
+.sw-branch,
 .bp-branch-node {
   --head: #2f7a4c;
 }
@@ -3220,6 +3299,21 @@ input[type="checkbox"]:disabled {
   opacity: 0.22;
 }
 
+/*
+ * A version the search found, in a lane it keeps lit: a bright white ring, not a hue,
+ * since lanes and tiles come in any hue (and orange is the selection, a wire's target,
+ * a move and unsaved files). Thicker and farther out for the one Enter went to last.
+ */
+.bp-node.hit {
+  outline: 2px solid var(--text);
+  outline-offset: 4px;
+}
+
+.bp-node.hit-now {
+  outline-width: 4px;
+  outline-offset: 6px;
+}
+
 .bp-search {
   display: inline-flex;
   align-items: center;
@@ -3278,6 +3372,9 @@ input[type="checkbox"]:disabled {
   right: auto;
   z-index: 60;
   width: 268px;
+  /* Moved up once drawn (see BlueprintTab); one taller than the window scrolls. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
 }
 
 .bp-panel {
