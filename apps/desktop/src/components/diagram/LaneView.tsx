@@ -46,6 +46,7 @@ export const LaneView = memo(function LaneView({
   dim,
   hits,
   hitNow,
+  marks,
   act,
 }: {
   root: string;
@@ -70,6 +71,8 @@ export const LaneView = memo(function LaneView({
   hits: Set<string> | null;
   /** The one of them Enter went to last. */
   hitNow: string | null;
+  /** Nodes here marked for A/B: key → "A" or "B". */
+  marks: Record<string, "A" | "B"> | null;
   act: React.RefObject<Actions>;
 }) {
   const { lane, origin, at, frame } = placed;
@@ -378,8 +381,8 @@ export const LaneView = memo(function LaneView({
               style={style}
               onPointerDown={(e) => act.current.dragNode(e, lane, key)}
               data-node={key}
-              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""} ${dragging === key ? "dragging" : ""} ${pullCls(key)}`}
-              onClick={() => act.current.select(lane.path, n.key, true)}
+              className={`bp-node bp-work status-${n.status} ${isSelected ? "selected" : ""} ${dragging === key ? "dragging" : ""} ${pullCls(key)} ${marks?.[n.key] ? "ab-marked" : ""}`}
+              onClick={(e) => (e.shiftKey ? act.current.mark(lane, n.key) : act.current.select(lane.path, n.key, true))}
               onContextMenu={(e) => act.current.workMenu(e, lane, n)}
               title="Файл в папке сейчас: щёлкните, чтобы описать и сохранить"
             >
@@ -387,6 +390,7 @@ export const LaneView = memo(function LaneView({
                 <Icon name="edit" size={12} />
                 <span className="bp-title">Сейчас в папке</span>
                 <span className="bp-state">{WORK_WORD[n.status]}</span>
+                {marks?.[n.key] && <span className="bp-ab">{marks[n.key]}</span>}
               </div>
               <ExecPin side="in" on onPull={pin(key, "in")} />
               <div className="bp-rows">
@@ -443,8 +447,9 @@ export const LaneView = memo(function LaneView({
               flash === n.key ? "flash" : "",
               hits?.has(n.key) ? (hitNow === n.key ? "hit hit-now" : "hit") : "",
               pullCls(key),
+              marks?.[n.key] ? "ab-marked" : "",
             ].join(" ")}
-            onClick={() => act.current.select(lane.path, n.key)}
+            onClick={(e) => (e.shiftKey ? act.current.mark(lane, n.key) : act.current.select(lane.path, n.key))}
             onContextMenu={(e) => act.current.versionMenu(e, lane, n)}
             title={`${v.message || "без описания"}\n${formatDate(v.createdAt)} · ${v.author} · ${short(v.id)}${
               n.branch ? "" : "\nБез ветки: проведите к ней провод от ветки или версии"
@@ -463,6 +468,7 @@ export const LaneView = memo(function LaneView({
                   в папке
                 </span>
               )}
+              {marks?.[n.key] && <span className="bp-ab">{marks[n.key]}</span>}
             </div>
             <ExecPin side="in" on={n.links.length > 0 || !!n.branch} onPull={pin(key, "in")} />
             <ExecPin side="out" on={fed.has(n.key)} onPull={pin(key, "out")} />

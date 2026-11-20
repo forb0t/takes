@@ -17,6 +17,7 @@ import {
   previousVersion,
   songHue,
   type Lane,
+  type LaneNode,
   type Layout,
   type Point,
   type Rect,
@@ -51,6 +52,7 @@ import {
   type Actions,
   type BranchStart,
   type Drag,
+  type Mark,
   type Match,
   type Menu,
   type MenuItem,
@@ -140,6 +142,14 @@ export function BlueprintTab({
   const [showMap, setShowMap] = useState(() => loadFlag("takes.bpmap", true));
   /** The sheet of what can be done on the diagram and how. */
   const [help, setHelp] = useState(false);
+  /** Versions (or files on disk) marked for an A/B comparison, A first. */
+  const [marked, setMarked] = useState<Mark[]>([]);
+  /** The same by song, for its lane to show: node → "A" or "B". */
+  const marksByLane = useMemo(() => {
+    const map = new Map<string, Record<string, "A" | "B">>();
+    marked.forEach((m, i) => map.set(m.lane, { ...map.get(m.lane), [m.key]: i === 0 ? "A" : "B" }));
+    return map;
+  }, [marked]);
   const [drag, setDrag] = useState<Drag | null>(null);
   const lanes = songs.lanes;
 
@@ -812,7 +822,7 @@ export function BlueprintTab({
   // Esc closes the help sheet, then the file panel with the selection; an open menu and a pulled wire take it first.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || menu || editing || (!help && !selected && !selectedTile)) return;
+      if (e.key !== "Escape" || menu || editing || (!help && !selected && !selectedTile && !marks.length)) return;
       // A field in the file panel (the description) gives Esc to the panel: what was typed stays as the draft.
       const field = (e.target as HTMLElement).closest("input, textarea, select, [contenteditable]");
       if (e.isComposing || (field && !field.closest(".bp-panel"))) return;
@@ -822,6 +832,10 @@ export function BlueprintTab({
       if (document.querySelector(".modal-backdrop")) return;
       if (help) {
         setHelp(false);
+        return;
+      }
+      if (!selected && !selectedTile) {
+        setMarked([]);
         return;
       }
       setSelected(null);
@@ -873,6 +887,74 @@ export function BlueprintTab({
     label: `v${n.number} · ${n.version.message || short(n.version.id)}`,
   });
   const nowTrack = (path: string): Track => ({ root, rev: null, path, label: "Сейчас на диске (не сохранено)" });
+
+  // ---- A/B of any two nodes ---------------------------------------------------------
+
+  /** A marked node as it is now; gone when the song changed so that it is no longer there. */
+  const markedNode = (m: Mark) => {
+    const lane = lanes?.find((l) => l.path === m.lane);
+    const n = lane?.nodes.find((x) => x.key === m.key);
+    return lane && n ? { lane, n } : null;
+  };
+  const marks = marked.flatMap((m) => {
+    const found = markedNode(m);
+    return found ? [found] : [];
+  });
+  /** What a node plays or shows: one of the song's versions, or the file on disk. */
+  const trackOf = (lane: Lane, n: LaneNode): Track =>
+    n.kind === "work"
+      ? { ...nowTrack(n.path), label: `${songName(lane)} · сейчас на диске` }
+      : { ...versionTrack(n), label: `${songName(lane)} · ${versionName(n)}` };
+  const comparable = (n: LaneNode) =>
+    n.kind === "work" ? n.status !== "deleted" && !!previewKind(n.path) : n.change !== "deleted" && !n.pruned && !!previewKind(n.path);
+
+  /** Shift + click: marks a node for A/B (A, then B; a third replaces A), or no longer. */
+  function mark(lane: Lane, key: string) {
+    const n = lane.nodes.find((x) => x.key === key);
+    if (!n || !comparable(n)) {
+      toast("У этого узла нет файла, который можно послушать или посмотреть", "info");
+      return;
+    }
+    setMarked((all) => {
+      const kept = all.filter((m) => markedNode(m));
+      if (kept.some((m) => m.lane === lane.path && m.key === key)) {
+        return kept.filter((m) => !(m.lane === lane.path && m.key === key));
+      }
+      return [...kept, { lane: lane.path, key }].slice(-2);
+    });
+  }
+
+  /** Plays or shows the two marked nodes side by side. */
+  function compareMarked(pair = marks) {
+    if (pair.length !== 2) return;
+    const [a, b] = pair;
+    if (previewKind(a.n.path) !== previewKind(b.n.path)) {
+      toast("Сравнивать можно файлы одного вида: два звука, две картинки, два текста или два PDF", "error");
+      return;
+    }
+    player.open([trackOf(a.lane, a.n), trackOf(b.lane, b.n)]);
+  }
+
+  /** Menu items to mark a node for A/B, or compare it with the one marked. */
+  function markItems(lane: Lane, n: LaneNode): MenuItem[] {
+    if (!comparable(n)) return [];
+    const isMarked = marks.some((m) => m.lane === lane && m.n === n);
+    const other = marks.find((m) => !(m.lane === lane && m.n === n));
+    const items: MenuItem[] = [];
+    if (other && !isMarked && marks.length === 1) {
+      items.push({
+        label: `Сравнить с «${songName(other.lane)}», ${other.n.kind === "work" ? "сейчас на диске" : versionName(other.n)}`,
+        icon: "wave",
+        run: () => compareMarked([other, { lane, n }]),
+      });
+    }
+    items.push({
+      label: isMarked ? "Снять отметку A/B" : "Отметить для сравнения A/B (Shift+щелчок)",
+      icon: "check",
+      run: () => mark(lane, n.key),
+    });
+    return items;
+  }
 
   /** Only this version to another branch of its song; the versions after it close up. Files do not change. */
   function moveToBranch(lane: Lane, n: SongVersion, to: string) {
@@ -991,6 +1073,7 @@ export function BlueprintTab({
       icon: "tag",
       run: () => setTagging({ rev: n.version.id, label: `версии ${short(n.version.id)}` }),
     });
+    items.push(...markItems(lane, n));
     items.push({ label: "Открыть во вкладке «Файлы»", icon: "doc", run: () => onOpenFile(n.path) });
     return items;
   }
@@ -1022,6 +1105,7 @@ export function BlueprintTab({
         run: () => rename(w.path, oldName).catch((e) => toast(errorText(e), "error")),
       });
     }
+    items.push(...markItems(lane, w));
     if (w.status !== "deleted") items.push({ label: "Показать в папке", icon: "folder", run: () => reveal(w.path) });
     return items;
   }
@@ -1148,6 +1232,7 @@ export function BlueprintTab({
     pullPin,
     grabWire,
     breakWire,
+    mark,
   };
 
   // ---- drawing ------------------------------------------------------------------
@@ -1191,6 +1276,25 @@ export function BlueprintTab({
             >
               <Icon name="edit" size={12} /> не сохранено · {unsaved}
             </button>
+          )}
+          {marks.length > 0 && (
+            <span className="bp-ab-bar">
+              {marks.map((m, i) => (
+                <span key={`${m.lane.path}:${m.n.key}`} className="chip chip-on" title={trackOf(m.lane, m.n).label}>
+                  <b>{i === 0 ? "A" : "B"}</b> {trackOf(m.lane, m.n).label}
+                </span>
+              ))}
+              {marks.length === 2 ? (
+                <button className="btn btn-small btn-primary" onClick={() => compareMarked()}>
+                  <Icon name="wave" size={13} /> Сравнить A/B
+                </button>
+              ) : (
+                <span className="muted nowrap">Shift+щелчок — вторая</span>
+              )}
+              <button className="icon-btn" onClick={() => setMarked([])} title="Снять отметки (Esc)" aria-label="Снять отметки">
+                <Icon name="close" size={13} />
+              </button>
+            </span>
           )}
           {removedCount > 0 && (
             <button
@@ -1350,6 +1454,7 @@ export function BlueprintTab({
                 dim={!!matched && !matched.has(p.lane.path)}
                 hits={hits.get(p.lane.path) ?? null}
                 hitNow={hitNow?.lane === p.lane.path ? hitNow.key : null}
+                marks={marksByLane.get(p.lane.path) ?? null}
                 pullAt={pull?.target?.lane === p.lane.path ? `${pull.ok ? "ok" : "bad"}:${pull.target.key}` : null}
                 pullWire={
                   pull?.moving && pull.fixed.lane === p.lane.path ? `${pull.moving.from}>${pull.moving.to}` : null

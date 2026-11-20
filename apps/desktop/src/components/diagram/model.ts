@@ -167,7 +167,12 @@ export interface Actions {
   grabWire: (e: React.PointerEvent, lane: Lane, w: Wire) => void;
   /** A double click on a wire: it breaks. */
   breakWire: (lane: Lane, w: Wire) => void;
+  /** Shift + click on a version or the file on disk: marks it (or no longer) for an A/B comparison. */
+  mark: (lane: Lane, key: string) => void;
 }
+
+/** A node marked for an A/B comparison: song (path) and node key. */
+export type Mark = { lane: string; key: string };
 
 /** While dragging, the pointer passing over text must not select it. */
 export function noSelecting(on: boolean) {
