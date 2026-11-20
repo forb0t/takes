@@ -3421,3 +3421,92 @@ input[type="checkbox"]:disabled {
     width: 150px;
   }
 }
+
+/* ---- album ------------------------------------------------------------------ */
+
+.album-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.album-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.2fr) 88px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 12px;
+}
+
+.album-row + .album-row {
+  border-top: 1px solid var(--border);
+}
+
+.album-row.off .album-name span,
+.album-row.off .album-note {
+  opacity: 0.5;
+}
+
+.album-name {
+  min-width: 0;
+  color: var(--text);
+}
+
+.album-name .nowrap {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.album-no {
+  min-width: 1.6em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.album-row select {
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+}
+
+.album-note {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-tools {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.album-tools .icon-btn:disabled {
+  opacity: 0.3;
+}
+
+.album-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 24px;
+}
+
+@media (max-width: 760px) {
+  .album-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .album-note {
+    grid-column: 1 / -1;
+  }
+}

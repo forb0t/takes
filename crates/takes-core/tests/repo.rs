@@ -1400,3 +1400,64 @@ fn dropping_versions_of_the_folders_history_keeps_what_is_needed() {
     assert_eq!(saved(&repo, "HEAD", "song.wav").unwrap(), b"new mix");
     assert_eq!(repo.log(None).unwrap().len(), 3);
 }
+
+#[test]
+fn an_album_takes_each_song_from_its_own_version() {
+    let (dir, mut repo) = setup();
+    write(&repo, "01 Intro.wav", "intro v1");
+    write(&repo, "02 Night/mix.wav", "night v1");
+    repo.commit("v1", &[]).unwrap();
+    let first = repo.resolve("HEAD").unwrap().to_hex();
+    write(&repo, "01 Intro.wav", "intro v2");
+    repo.commit("v2", &[]).unwrap();
+    let outside = TempDir::new().unwrap();
+    let acoustic = outside.path().join("acoustic.wav");
+    fs::write(&acoustic, "night acoustic").unwrap();
+    let take = repo
+        .save_take(
+            TakeFrom::Outside(&acoustic),
+            "02 Night/mix.wav",
+            "HEAD",
+            "acoustic",
+        )
+        .unwrap()
+        .to_hex();
+
+    let dest = dir.path().join("Album.zip");
+    let files = [
+        (
+            first.clone(),
+            "01 Intro.wav".to_owned(),
+            "01 Intro.wav".to_owned(),
+        ),
+        (take, "02 Night/mix.wav".to_owned(), "02 mix.wav".to_owned()),
+    ];
+    assert_eq!(repo.export_files(&files, &dest).unwrap(), 2);
+    let mut zip = zip::ZipArchive::new(fs::File::open(&dest).unwrap()).unwrap();
+    let mut read = |name: &str| {
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name(name).unwrap(), &mut out).unwrap();
+        out
+    };
+    assert_eq!(read("Album/01 Intro.wav"), "intro v1");
+    assert_eq!(read("Album/02 mix.wav"), "night acoustic");
+    // The folder stays as it was.
+    assert_eq!(read_text(&repo, "02 Night/mix.wav"), "night v1");
+
+    // One name twice, or one leaving the archive's folder, is refused.
+    for name in ["01 Intro.wav", "../x.wav"] {
+        let twice = [
+            files[0].clone(),
+            (first.clone(), "01 Intro.wav".into(), name.into()),
+        ];
+        assert!(
+            repo.export_files(&twice, &dir.path().join("Bad.zip"))
+                .is_err()
+        );
+    }
+    assert!(!dir.path().join("Bad.zip").exists());
+}
+
+fn read_text(repo: &Repo, path: &str) -> String {
+    String::from_utf8(read(repo, path)).unwrap()
+}

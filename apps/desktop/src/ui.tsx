@@ -44,12 +44,15 @@ const paths = {
   minus: "M5 12h14",
   up: "M12 19V5M6 11l6-6 6 6",
   down: "M12 5v14M6 13l6 6 6-6",
+  prev: "M19 5v14L9 12zM5 5h2.5v14H5z",
+  next: "M5 5v14l10-7zM16.5 5H19v14h-2.5z",
+  album: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
 } as const;
 
 export type IconName = keyof typeof paths;
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
-  const filled = name === "play" || name === "pause";
+  const filled = name === "play" || name === "pause" || name === "prev" || name === "next";
   return (
     <svg
       width={size}

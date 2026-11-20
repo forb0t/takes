@@ -441,6 +441,26 @@ pub async fn export_zip(root: String, rev: String, dest: String) -> CmdResult<u6
     blocking(move || Ok(open(&root)?.export_zip(&rev, Path::new(&dest))?)).await
 }
 
+/// One file of an album: a version of a song, under a name in the archive.
+#[derive(serde::Deserialize)]
+pub struct AlbumFile {
+    rev: String,
+    path: String,
+    name: String,
+}
+
+/// Packs chosen versions of files into a ZIP (an album, each song from its
+/// chosen branch), leaving the folder as it is.
+#[tauri::command]
+pub async fn export_album(root: String, files: Vec<AlbumFile>, dest: String) -> CmdResult<u64> {
+    blocking(move || {
+        let files: Vec<(String, String, String)> =
+            files.into_iter().map(|f| (f.rev, f.path, f.name)).collect();
+        Ok(open(&root)?.export_files(&files, Path::new(&dest))?)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn set_author(root: String, name: String) -> CmdResult<()> {
     blocking(move || Ok(open(&root)?.set_config("user.name", name.trim())?)).await

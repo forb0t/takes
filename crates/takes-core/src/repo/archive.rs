@@ -1,5 +1,6 @@
 //! A version as a ZIP archive, e.g. a release to send to a label.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
 use std::path::Path;
@@ -9,6 +10,7 @@ use zip::{CompressionMethod, DateTime, ZipWriter};
 
 use super::Repo;
 use crate::error::{Error, Result};
+use crate::model::Entry;
 
 impl Repo {
     /// Writes the files of version `rev` into a ZIP at `dest`, inside a
@@ -18,23 +20,55 @@ impl Repo {
     pub fn export_zip(&self, rev: &str, dest: &Path) -> Result<u64> {
         let id = self.resolve(rev)?;
         let snapshot = self.snapshot(id)?;
-        let tree = self.tree(id)?;
+        let files: Vec<(String, Entry, i64)> = self
+            .tree(id)?
+            .into_iter()
+            .map(|(path, entry)| (path, entry, snapshot.created_at))
+            .collect();
+        self.write_zip(&files, dest)
+    }
+
+    /// Writes chosen versions of files into a ZIP at `dest`, like
+    /// [`Repo::export_zip`]: each of `files` is (version, file there, name
+    /// in the archive). An album, say, with every song from the branch
+    /// chosen for it; the folder is not touched. Returns the number of files.
+    pub fn export_files(&self, files: &[(String, String, String)], dest: &Path) -> Result<u64> {
+        let mut chosen = Vec::new();
+        let mut names = HashSet::new();
+        for (rev, path, name) in files {
+            let name = name.trim_matches('/');
+            if name.is_empty() || name.split('/').any(|part| part == ".." || part.is_empty()) {
+                return Err(Error::InvalidPath(name.into()));
+            }
+            if !names.insert(name.to_lowercase()) {
+                return Err(Error::InvalidPath(format!("{name}: twice in the archive")));
+            }
+            let id = self.resolve(rev)?;
+            let entry = self.file_at(rev, path)?;
+            chosen.push((name.to_owned(), entry, self.snapshot(id)?.created_at));
+        }
+        self.write_zip(&chosen, dest)
+    }
+
+    /// The files (name in the archive, content, when saved) as a ZIP in a
+    /// folder named like the archive, written whole or not at all.
+    fn write_zip(&self, files: &[(String, Entry, i64)], dest: &Path) -> Result<u64> {
         let pruned = self.pruned()?;
-        if let Some((path, _)) = tree.iter().find(|(_, e)| pruned.contains(&e.blob)) {
+        if let Some((path, _, _)) = files.iter().find(|(_, e, _)| pruned.contains(&e.blob)) {
             return Err(Error::ContentPruned(path.clone()));
         }
         let folder = dest
             .file_stem()
             .map_or_else(|| "export".into(), |s| s.to_string_lossy().into_owned());
-        let options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Stored)
-            .last_modified_time(zip_time(snapshot.created_at));
         let _lock = self.lock_shared()?;
         let tmp = dest.with_extension("zip.partial");
         let written = (|| -> Result<()> {
             let mut zip = ZipWriter::new(BufWriter::new(File::create(&tmp)?));
-            for (path, entry) in &tree {
-                let options = options.large_file(entry.size >= u64::from(u32::MAX));
+            for (path, entry, saved_at) in files {
+                let options = SimpleFileOptions::default()
+                    .compression_method(CompressionMethod::Stored)
+                    .last_modified_time(zip_time(*saved_at))
+                    .large_file(entry.size >= u64::from(u32::MAX));
                 zip.start_file(format!("{folder}/{path}"), options)
                     .map_err(zip_error)?;
                 self.store.write_blob(&self.blob(entry.blob)?, &mut zip)?;
@@ -48,7 +82,7 @@ impl Repo {
         }
         written?;
         fs::rename(&tmp, dest)?;
-        Ok(tree.len() as u64)
+        Ok(files.len() as u64)
     }
 }
 

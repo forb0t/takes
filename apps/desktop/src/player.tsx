@@ -25,11 +25,21 @@ export interface Track {
   label: string;
 }
 
-/** One file version, or two to compare. */
+/** Songs played one after another, as on an album. */
+export interface Album {
+  tracks: Track[];
+  /** The one playing. */
+  at: number;
+  /** Silence between songs, in milliseconds. */
+  gapMs: number;
+}
+
+/** One file version, or two to compare; or one song of an album. */
 interface Session {
   id: number;
   tracks: Track[];
   kind: PreviewKind;
+  album?: Album;
 }
 
 interface PlayerApi {
@@ -38,6 +48,8 @@ interface PlayerApi {
   /** An image, text or PDF on screen; independent, so music keeps playing. */
   viewer: Session | null;
   open: (tracks: Track[]) => void;
+  /** Plays `album.tracks` one after another, from `album.at`. */
+  playAlbum: (album: Album) => void;
   close: () => void;
   closeViewer: () => void;
 }
@@ -67,10 +79,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (kind === "audio") setSession(opened);
     else setViewer(opened);
   }, []);
+  const playAlbum = useCallback((album: Album) => {
+    const track = album.tracks[album.at];
+    if (track) setSession({ id: ++next.current, tracks: [track], kind: "audio", album });
+  }, []);
   const close = useCallback(() => setSession(null), []);
   const closeViewer = useCallback(() => setViewer(null), []);
   return (
-    <PlayerContext.Provider value={{ session, viewer, open, close, closeViewer }}>{children}</PlayerContext.Provider>
+    <PlayerContext.Provider value={{ session, viewer, open, playAlbum, close, closeViewer }}>
+      {children}
+    </PlayerContext.Provider>
   );
 }
 
@@ -118,10 +136,18 @@ export function CompareButton({ a, b }: { a: Track; b: Track }) {
 }
 
 export function PlayerBar() {
-  const { session, viewer, close, closeViewer } = usePlayer();
+  const { session, viewer, playAlbum, close, closeViewer } = usePlayer();
   return (
     <>
-      {session && <Player key={session.id} tracks={session.tracks} onClose={close} />}
+      {session && (
+        <Player
+          key={session.id}
+          tracks={session.tracks}
+          album={session.album}
+          onAlbumStep={(at) => session.album && playAlbum({ ...session.album, at })}
+          onClose={close}
+        />
+      )}
       {viewer?.kind === "image" && <ImageViewer key={viewer.id} tracks={viewer.tracks} onClose={closeViewer} />}
       {viewer?.kind === "text" && <TextViewer key={viewer.id} tracks={viewer.tracks} onClose={closeViewer} />}
       {viewer?.kind === "pdf" && <PdfViewer key={viewer.id} tracks={viewer.tracks} onClose={closeViewer} />}
@@ -189,7 +215,18 @@ function useDeck(track: Track | undefined): Deck {
   return { src, analysis, analysisError, comments, reloadComments };
 }
 
-function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
+function Player({
+  tracks,
+  album,
+  onAlbumStep,
+  onClose,
+}: {
+  tracks: Track[];
+  album?: Album;
+  /** Goes to song `at` of the album. */
+  onAlbumStep: (at: number) => void;
+  onClose: () => void;
+}) {
   const ab = tracks.length === 2;
   const decks = [useDeck(tracks[0]), useDeck(tracks[1])];
   const audioA = useRef<HTMLAudioElement>(null);
@@ -251,6 +288,21 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
     const a = audios[active].current;
     if (a?.paused) a.play().catch(() => setPlaying(false));
   }
+
+  // On an album, the next song is made ready while this one plays, and
+  // comes after the silence chosen once this one ends.
+  const nextTrack = album?.tracks[album.at + 1];
+  useEffect(() => {
+    if (!nextTrack) return;
+    api.previewFile(nextTrack.root, nextTrack.rev, nextTrack.path).catch(() => {});
+    api.analyzeAudio(nextTrack.root, nextTrack.rev, nextTrack.path).catch(() => {});
+  }, [nextTrack]);
+  const [ended, setEnded] = useState(false);
+  useEffect(() => {
+    if (!ended || !album || !nextTrack) return;
+    const t = setTimeout(() => onAlbumStep(album.at + 1), album.gapMs);
+    return () => clearTimeout(t);
+  }, [ended]);
 
   // Start playing as soon as the first version is ready.
   const autoplayed = useRef(false);
@@ -324,9 +376,17 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
           ref={audios[i]}
           src={decks[i].src ?? undefined}
           preload="auto"
-          onPlay={() => i === keys.current.active && setPlaying(true)}
+          onPlay={() => {
+            if (i !== keys.current.active) return;
+            setPlaying(true);
+            setEnded(false);
+          }}
           onPause={() => i === keys.current.active && setPlaying(false)}
-          onEnded={() => i === keys.current.active && setPlaying(false)}
+          onEnded={() => {
+            if (i !== keys.current.active) return;
+            setPlaying(false);
+            setEnded(true);
+          }}
           onLoadedMetadata={(e) => {
             const ms = e.currentTarget.duration * 1000;
             setMediaDurations((d) => d.map((v, j) => (j === i && Number.isFinite(ms) ? ms : v)));
@@ -354,7 +414,13 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
       <div className="player-top">
         <div className="player-info">
           <div className="player-title">{splitPath(track.path).name}</div>
-          <div className="player-sub">{ab ? "Сравнение версий · X — переключить" : track.label}</div>
+          <div className="player-sub">
+            {ab
+              ? "Сравнение версий · X — переключить"
+              : album
+                ? `Альбом · ${album.at + 1} из ${album.tracks.length} · ${track.label}`
+                : track.label}
+          </div>
           {loop && (
             <button className="chip chip-on loop-chip" onClick={() => setLoop(null)} title="Перестать повторять (L)">
               ⟲ {formatTime(loop[0])}–{formatTime(loop[1])} <Icon name="close" size={11} />
@@ -425,6 +491,17 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
       </div>
 
       <div className="player-main">
+        {album && (
+          <button
+            className="icon-btn"
+            disabled={album.at === 0}
+            onClick={() => onAlbumStep(album.at - 1)}
+            title="Предыдущая песня альбома"
+            aria-label="Предыдущая песня"
+          >
+            <Icon name="prev" size={16} />
+          </button>
+        )}
         <button
           className="transport"
           onClick={toggle}
@@ -434,6 +511,17 @@ function Player({ tracks, onClose }: { tracks: Track[]; onClose: () => void }) {
         >
           <Icon name={playing ? "pause" : "play"} size={18} />
         </button>
+        {album && (
+          <button
+            className="icon-btn"
+            disabled={!nextTrack}
+            onClick={() => onAlbumStep(album.at + 1)}
+            title={nextTrack ? `Дальше: ${splitPath(nextTrack.path).name}` : "Это последняя песня альбома"}
+            aria-label="Следующая песня"
+          >
+            <Icon name="next" size={16} />
+          </button>
+        )}
         <span className="time">{formatTime(positionMs)}</span>
         <div className="wave-wrap">
           <Waveform

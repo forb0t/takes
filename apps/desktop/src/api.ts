@@ -280,6 +280,9 @@ export const api = {
   dropVersions: (root: string, versions: string[], paths: string[], dryRun: boolean) =>
     invoke<Cleanup>("drop_versions", { root, versions, paths, dryRun }),
   exportZip: (root: string, rev: string, dest: string) => invoke<number>("export_zip", { root, rev, dest }),
+  /** Chosen versions of files in one ZIP (an album), the folder untouched; how many files. */
+  exportAlbum: (root: string, files: { rev: string; path: string; name: string }[], dest: string) =>
+    invoke<number>("export_album", { root, files, dest }),
   setAuthor: (root: string, name: string) => invoke<void>("set_author", { root, name }),
 
   switchBranch: (root: string, name: string) => invoke<void>("switch_branch", { root, name }),

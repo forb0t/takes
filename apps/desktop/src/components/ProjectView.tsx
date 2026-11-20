@@ -23,6 +23,7 @@ import { ImportDialog } from "./ImportDialog";
 import { MergeDialog } from "./MergeDialog";
 import { SyncControl } from "./SyncControl";
 import { useSongs } from "../songs";
+import { AlbumDialog } from "./AlbumDialog";
 
 type Tab = "files" | "blueprint" | "history";
 
@@ -67,6 +68,7 @@ export function ProjectView({ root }: { root: string }) {
   const [syncState, setSyncState] = useState<SyncState | null>(null);
   const [mergeFrom, setMergeFrom] = useState<DivergedBranch | null>(null);
   const [cleanup, setCleanup] = useState(false);
+  const [album, setAlbum] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [importing, setImporting] = useState<Importing | null>(null);
   const [dropping, setDropping] = useState(false);
@@ -307,6 +309,13 @@ export function ProjectView({ root }: { root: string }) {
           <button className="chip" title="Автор новых версий" onClick={() => setEditAuthor(true)}>
             {overview.author} <Icon name="edit" size={12} />
           </button>
+          <button
+            className="btn"
+            onClick={() => setAlbum(true)}
+            title="Все песни по порядку: слушать подряд или скачать ZIP, с выбором ветки каждой"
+          >
+            <Icon name="album" /> Альбом
+          </button>
           <div className="add-menu">
             <button className="btn" onClick={() => setAddMenu((o) => !o)} title="Скопировать файлы или папку в проект">
               <Icon name="plus" /> Добавить
@@ -441,6 +450,9 @@ export function ProjectView({ root }: { root: string }) {
           onClose={() => setImporting(null)}
           onDone={refreshAll}
         />
+      )}
+      {album && (
+        <AlbumDialog root={root} name={overview.name} songs={songs} files={files} onClose={() => setAlbum(false)} />
       )}
       {cleanup && (
         <CleanupDialog

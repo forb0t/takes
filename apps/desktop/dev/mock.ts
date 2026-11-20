@@ -315,6 +315,8 @@ mockIPC(
         ];
       case "import_files":
         return { paths: ["Stems/bass.wav", "Ночь.wav"], replaced: 1, saved: 2 };
+      case "export_album":
+        return (a.files as unknown[]).length;
       case "drop_versions":
         return { versions: 2, contents: 1, bytes: 84_000_000 };
       case "cleanup":

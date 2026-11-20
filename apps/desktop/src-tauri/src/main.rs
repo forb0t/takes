@@ -42,6 +42,7 @@ fn main() {
             commands::cleanup,
             commands::drop_versions,
             commands::export_zip,
+            commands::export_album,
             commands::set_author,
             commands::switch_branch,
             commands::save_take,
